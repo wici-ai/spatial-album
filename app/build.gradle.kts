@@ -11,7 +11,7 @@ android {
         applicationId = "com.wici.androidalbumdemo"
         minSdk = 33
         targetSdk = 34
-        versionCode = 2
+        versionCode = 3
         versionName = "0.1"
     }
 
