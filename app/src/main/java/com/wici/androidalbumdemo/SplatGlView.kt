@@ -26,6 +26,7 @@ class SplatGlView(
     camCx: Float? = null,
     camCy: Float? = null,
     splatStreamUrl: String? = null,
+    ingestImageUri: String? = null,
     splatCacheMaxBytes: Long? = null,
     networkStreamEnabled: Boolean = true
 ) : GLSurfaceView(context) {
@@ -45,6 +46,7 @@ class SplatGlView(
         camCx,
         camCy,
         splatStreamUrl,
+        ingestImageUri,
         splatCacheMaxBytes,
         networkStreamEnabled
     )

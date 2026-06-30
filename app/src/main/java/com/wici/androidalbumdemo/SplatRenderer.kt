@@ -2,9 +2,11 @@ package com.wici.androidalbumdemo
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Half
 import android.util.Log
@@ -12,15 +14,18 @@ import android.util.Base64
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.nio.charset.StandardCharsets
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.GZIPInputStream
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
@@ -49,6 +54,7 @@ class SplatRenderer(
     camCx: Float? = null,
     camCy: Float? = null,
     private val splatStreamUrl: String? = null,
+    private val ingestImageUri: String? = null,
     splatCacheMaxBytes: Long? = null,
     private val networkStreamEnabled: Boolean = true
 ) : GLSurfaceView.Renderer {
@@ -1001,14 +1007,19 @@ class SplatRenderer(
                 "splatCacheMiss photoId=$streamId key=$cacheKey capBytes=$splatCacheMaxBytes " +
                     "density=${requestedStreamDensity ?: "default"}"
             )
+            val started = SystemClock.elapsedRealtime()
             if (!networkStreamEnabled) {
                 streamError = "cached splat missing"
                 status("Cached splat missing for $streamId")
                 Log.w(TAG, "splatCacheRequiredMiss photoId=$streamId key=$cacheKey networkStreamEnabled=false")
                 return@execute
             }
+            val localIngestUri = ingestImageUri
+            if (localIngestUri != null) {
+                streamIngestSplat(streamId, cacheKey, localIngestUri, started)
+                return@execute
+            }
             Log.i(TAG, "streamStart photoId=$streamId density=${requestedStreamDensity ?: "default"} footprint=$renderFootprintScale url=$url")
-            val started = SystemClock.elapsedRealtime()
             var conn: HttpURLConnection? = null
             var tmpCacheFile: File? = null
             var cacheComplete = false
@@ -1077,6 +1088,223 @@ class SplatRenderer(
                 if (streamConnection === conn) streamConnection = null
             }
         }
+    }
+
+    private fun streamIngestSplat(streamId: String, cacheKey: String, imageUriString: String, started: Long) {
+        Log.i(TAG, "ingestStreamStart photoId=$streamId key=$cacheKey uri=$imageUriString footprint=$renderFootprintScale")
+        status("Reframing $streamId${experimentLabel()}...")
+        var conn: HttpURLConnection? = null
+        var tmpCacheFile: File? = null
+        var cacheComplete = false
+        var uploadBytes = -1L
+        var responseWaitMs = -1L
+        var downloadMs = -1L
+        try {
+            val upload = buildIngestUploadPayload(streamId, imageUriString)
+            uploadBytes = upload.bytes.size.toLong()
+            val boundary = "----WiciAndroidRenderer${SystemClock.elapsedRealtimeNanos()}"
+            conn = (URL(INGEST_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 8_000
+                readTimeout = 300_000
+                doOutput = true
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                setRequestProperty("Accept", "application/octet-stream")
+                setRequestProperty(INGEST_SPLAT_ACCEPT_HEADER, "$INGEST_SPLAT_FORMAT_FP16_V1,gzip")
+            }
+            streamConnection = conn
+            conn.outputStream.use { out ->
+                writeMultipartText(out, boundary, "photoId", streamId)
+                writeMultipartText(out, boundary, "title", streamId)
+                out.writeUtf8("--$boundary\r\n")
+                out.writeUtf8("Content-Disposition: form-data; name=\"image\"; filename=\"${upload.filename}\"\r\n")
+                out.writeUtf8("Content-Type: ${upload.mime}\r\n\r\n")
+                out.write(upload.bytes)
+                out.writeUtf8("\r\n--$boundary--\r\n")
+            }
+            val waitStart = SystemClock.elapsedRealtime()
+            val code = conn.responseCode
+            responseWaitMs = SystemClock.elapsedRealtime() - waitStart
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            if (code !in 200..299) {
+                val text = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+                throw RuntimeException("HTTP $code: ${text.take(220)}")
+            }
+
+            val responseFormat = conn.getHeaderField("X-Splat-Format") ?: SplatCache.FORMAT_SPLAT
+            val responseEncoding = conn.getHeaderField("X-Splat-Encoding") ?: "identity"
+            val rowBytes = conn.getHeaderField("X-Splat-Row-Bytes")?.toIntOrNull()
+                ?: if (responseFormat == SplatCache.FORMAT_FP16_V1) SplatCache.FP16_ROW_BYTES else SPLAT_ROW_BYTES
+            val expected = conn.getHeaderField("X-Splat-Num-Gaussians")?.toIntOrNull() ?: 0
+            val wireBytes = conn.getHeaderField("X-Splat-Size-Bytes")?.toLongOrNull()
+                ?: conn.getHeaderField("Content-Length")?.toLongOrNull()
+                ?: -1L
+            val payloadBytes = conn.getHeaderField("X-Splat-Payload-Size-Bytes")?.toLongOrNull() ?: -1L
+            val fp32Bytes = conn.getHeaderField("X-Splat-Fp32-Size-Bytes")?.toLongOrNull() ?: -1L
+            streamExpectedCount = expected
+            sourceCameraFromHeaders(conn)?.let { headerCamera ->
+                pendingSourceCamera = headerCamera
+                Log.i(
+                    TAG,
+                    "ingestStreamCameraHeader photoId=$streamId source=${headerCamera.source} " +
+                        "fx=${headerCamera.fx} fy=${headerCamera.fy} cx=${headerCamera.cx} cy=${headerCamera.cy} " +
+                        "size=${headerCamera.width}x${headerCamera.height}"
+                )
+            }
+            status("Streaming $streamId${experimentLabel()} 0/${expected.takeIf { it > 0 } ?: "?"}")
+
+            val tmp = SplatCache.tempFile(context, cacheKey)
+            tmpCacheFile = tmp
+            val downloadStart = SystemClock.elapsedRealtime()
+            val receivedRecords = tmp.outputStream().use { cacheOut ->
+                requireNotNull(stream) { "ingest response body missing" }.use { rawInput ->
+                    val body = if (responseEncoding.equals("gzip", ignoreCase = true)) GZIPInputStream(rawInput) else rawInput
+                    body.use { decoded ->
+                        if (responseFormat == SplatCache.FORMAT_FP16_V1) {
+                            val header = readFully(decoded, SplatCache.FP16_HEADER_BYTES)
+                            val compactRecords = validateCompactSplatHeader(header)
+                            if (expected > 0 && compactRecords != expected) {
+                                Log.w(TAG, "ingestStreamRecordHeaderMismatch photoId=$streamId expected=$expected compact=$compactRecords")
+                            }
+                            cacheOut.write(header)
+                            consumeSplatInput(decoded, compactRecords, rowBytes = SplatCache.FP16_ROW_BYTES, format = SplatCache.FORMAT_FP16_V1) { bytes, count ->
+                                cacheOut.write(bytes, 0, count)
+                            }
+                        } else {
+                            require(rowBytes == SPLAT_ROW_BYTES) { "unexpected ingest row bytes $rowBytes for format=$responseFormat" }
+                            consumeSplatInput(decoded, expected, rowBytes = SPLAT_ROW_BYTES, format = SplatCache.FORMAT_SPLAT) { bytes, count ->
+                                cacheOut.write(bytes, 0, count)
+                            }
+                        }
+                    }
+                }
+            }
+            downloadMs = SystemClock.elapsedRealtime() - downloadStart
+            if (!streamCancelled.get()) {
+                enqueueStreamBatch(SplatBatch(FloatArray(0), FloatArray(0), FloatArray(0), 0, 0, receivedRecords, expected.takeIf { it > 0 } ?: receivedRecords, complete = true))
+                val elapsed = SystemClock.elapsedRealtime() - started
+                status("Streamed $streamId${experimentLabel()} $receivedRecords/${expected.takeIf { it > 0 } ?: "?"} in ${elapsed}ms")
+                Log.i(
+                    TAG,
+                    "ingestStreamFinished photoId=$streamId responseFormat=$responseFormat responseEncoding=$responseEncoding " +
+                        "received=$receivedRecords expected=$expected wireBytes=$wireBytes payloadBytes=$payloadBytes " +
+                        "fp32Bytes=$fp32Bytes uploadBytes=$uploadBytes responseWaitMs=$responseWaitMs " +
+                        "downloadMs=$downloadMs elapsedMs=$elapsed"
+                )
+                val store = SplatCache.commit(context, cacheKey, tmp, splatCacheMaxBytes)
+                cacheComplete = store.stored
+                Log.i(
+                    TAG,
+                    "splatCacheStored photoId=$streamId key=$cacheKey stored=${store.stored} " +
+                        "bytes=${store.bytes} totalBytes=${store.totalBytes} " +
+                        "evicted=${store.evictedCount}/${store.evictedBytes} reason=${store.reason ?: "-"}"
+                )
+            }
+        } catch (exc: Exception) {
+            if (!streamCancelled.get()) {
+                streamError = exc.message ?: exc.javaClass.simpleName
+                Log.e(TAG, "ingestStreamFailed photoId=$streamId", exc)
+                status("Reframe failed: ${streamError}")
+            }
+        } finally {
+            if (!cacheComplete) tmpCacheFile?.delete()
+            conn?.disconnect()
+            if (streamConnection === conn) streamConnection = null
+        }
+    }
+
+    private data class IngestUploadPayload(
+        val bytes: ByteArray,
+        val mime: String,
+        val filename: String
+    )
+
+    private fun buildIngestUploadPayload(streamId: String, imageUriString: String): IngestUploadPayload {
+        val imageUri = Uri.parse(imageUriString)
+        val sourceMime = context.contentResolver.getType(imageUri) ?: "image/jpeg"
+        var bitmap: Bitmap? = null
+        try {
+            val source = ImageDecoder.createSource(context.contentResolver, imageUri)
+            bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                decoder.isMutableRequired = false
+                val w = info.size.width
+                val h = info.size.height
+                val maxSide = max(w, h)
+                if (maxSide > INGEST_UPLOAD_MAX_SIDE) {
+                    val scale = INGEST_UPLOAD_MAX_SIDE.toFloat() / maxSide.toFloat()
+                    decoder.setTargetSize(max(1, (w * scale).toInt()), max(1, (h * scale).toInt()))
+                }
+            }
+            val bytes = ByteArrayOutputStream()
+            val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, INGEST_UPLOAD_JPEG_QUALITY, bytes)
+            if (!ok) throw RuntimeException("JPEG compress returned false")
+            val payload = bytes.toByteArray()
+            Log.i(
+                TAG,
+                "ingestStreamUploadDownscaled photoId=$streamId " +
+                    "bitmap=${bitmap.width}x${bitmap.height} bytes=${payload.size}"
+            )
+            return IngestUploadPayload(
+                bytes = payload,
+                mime = "image/jpeg",
+                filename = "android-import-${System.currentTimeMillis()}.jpg"
+            )
+        } catch (exc: Exception) {
+            Log.w(
+                TAG,
+                "ingestStreamUploadDownscaleFailed photoId=$streamId; falling back to raw upload: ${exc.message}",
+                exc
+            )
+            val payload = context.contentResolver.openInputStream(imageUri).use { input ->
+                requireNotNull(input) { "openInputStream returned null" }
+                input.readBytes()
+            }
+            return IngestUploadPayload(
+                bytes = payload,
+                mime = sourceMime,
+                filename = "android-import-${System.currentTimeMillis()}.${extensionForMime(sourceMime)}"
+            )
+        } finally {
+            bitmap?.recycle()
+        }
+    }
+
+    private fun writeMultipartText(out: OutputStream, boundary: String, name: String, value: String) {
+        out.writeUtf8("--$boundary\r\n")
+        out.writeUtf8("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+        out.writeUtf8(value)
+        out.writeUtf8("\r\n")
+    }
+
+    private fun OutputStream.writeUtf8(value: String) {
+        write(value.toByteArray(StandardCharsets.UTF_8))
+    }
+
+    private fun readFully(input: InputStream, byteCount: Int): ByteArray {
+        val out = ByteArray(byteCount)
+        var offset = 0
+        while (offset < byteCount) {
+            val n = input.read(out, offset, byteCount - offset)
+            if (n < 0) throw RuntimeException("unexpected EOF while reading $byteCount-byte compact splat header")
+            offset += n
+        }
+        return out
+    }
+
+    private fun validateCompactSplatHeader(header: ByteArray): Int {
+        require(header.size == SplatCache.FP16_HEADER_BYTES) { "bad compact splat header size ${header.size}" }
+        require(header.copyOfRange(0, FP16_MAGIC.size).contentEquals(FP16_MAGIC)) { "bad compact splat magic" }
+        val buffer = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.position(FP16_MAGIC.size)
+        val version = buffer.int
+        val rowBytes = buffer.int
+        val records = buffer.int
+        buffer.int // flags
+        require(version == 1) { "unsupported compact splat version $version" }
+        require(rowBytes == SplatCache.FP16_ROW_BYTES) { "unexpected compact splat row bytes $rowBytes" }
+        require(records > 0) { "empty compact splat payload" }
+        return records
     }
 
     private fun loadCachedSplat(streamId: String, entry: SplatCache.Entry) {
@@ -1978,6 +2206,11 @@ class SplatRenderer(
     companion object {
         private const val TAG = "AlbumGLESPerf"
         private const val SPLAT_STREAM_URL = "http://47.186.21.5:54228/orbit/splat_stream"
+        private const val INGEST_URL = "http://47.186.21.5:54228/orbit/ingest"
+        private const val INGEST_SPLAT_ACCEPT_HEADER = "X-Wici-Splat-Accept"
+        private const val INGEST_SPLAT_FORMAT_FP16_V1 = "fp16v1"
+        private const val INGEST_UPLOAD_MAX_SIDE = 1536
+        private const val INGEST_UPLOAD_JPEG_QUALITY = 90
         private const val SPLAT_ROW_BYTES = 32
         // Mirror the web viewer's GaussianSplats3D splatAlphaRemovalThreshold (SPLAT_ALPHA_THRESHOLD=5):
         // splats with stored alpha below this are dropped at parse time.
@@ -2018,6 +2251,16 @@ class SplatRenderer(
         private const val AUTO_FIT_MARGIN = 1.18f
         private const val CAMERA_SAFETY_MIN_SPLATS = 4_096
         private const val CAMERA_SAFETY_MIN_VISIBLE_PX = 64f
+        private val FP16_MAGIC = byteArrayOf(
+            'W'.code.toByte(),
+            'I'.code.toByte(),
+            'C'.code.toByte(),
+            'I'.code.toByte(),
+            'S'.code.toByte(),
+            'F'.code.toByte(),
+            '1'.code.toByte(),
+            '6'.code.toByte()
+        )
 
         private fun writeCovarianceFromDirectScales(
             out: FloatArray,
@@ -2155,6 +2398,14 @@ class SplatRenderer(
             val separator = if (url.contains("?")) "&" else "?"
             return "$url${separator}density=${URLEncoder.encode(density, "UTF-8")}"
         }
+
+        private fun extensionForMime(mime: String): String =
+            when {
+                mime.contains("png", ignoreCase = true) -> "png"
+                mime.contains("webp", ignoreCase = true) -> "webp"
+                mime.contains("heic", ignoreCase = true) || mime.contains("heif", ignoreCase = true) -> "heic"
+                else -> "jpg"
+            }
 
         private fun sourceFocalPx(width: Int, height: Int): Float {
             val diagonal = sqrt(width.toFloat() * width.toFloat() + height.toFloat() * height.toFloat())

@@ -1490,46 +1490,21 @@ class MainActivity : Activity() {
             return
         }
         val localUri = photo.localUri
-        if (photo.imported && photo.hasSplat && localUri != null) {
+        if (photo.imported && localUri != null) {
             val cacheKey = SplatCache.keyFor(photo.photoId, DEFAULT_SPLAT_DENSITY)
             if (SplatCache.lookup(this, cacheKey, SPLAT_ROW_BYTES) != null) {
                 Log.i(TAG, "Imported Reframing cache hit photoId=${photo.photoId} key=$cacheKey")
-                showViewer(photo)
+                showViewer(photo.copy(hasSplat = true))
                 return
             }
-            Log.i(TAG, "Imported Reframing cache miss photoId=${photo.photoId} key=$cacheKey; re-ingesting")
+            Log.i(TAG, "Imported Reframing cache miss photoId=${photo.photoId} key=$cacheKey; streaming ingest into viewer")
         }
         if (localUri == null) {
             showStaticPhoto(photo)
             return
         }
-        val status = showReframingLoading(photo)
-        status.text = "Reframing..."
-        Log.i(TAG, "Ingest start localPhotoId=${photo.photoId} uri=$localUri")
-        networkExecutor.execute {
-            try {
-                val started = SystemClock.elapsedRealtime()
-                val result = postIngestSplat(photo)
-                val baked = result.photo
-                replaceImportedPhoto(photo.photoId, baked)
-                val elapsed = SystemClock.elapsedRealtime() - started
-                Log.i(
-                    TAG,
-                    "Ingest done localPhotoId=${photo.photoId} photoId=${baked.photoId} " +
-                        "records=${result.records} bytes=${result.sizeBytes} stored=${result.store.stored} " +
-                        "elapsedMs=$elapsed"
-                )
-                runOnUiThread {
-                    status.text = "Reframing done"
-                    showViewer(baked)
-                }
-            } catch (exc: Exception) {
-                Log.e(TAG, "Ingest failed localPhotoId=${photo.photoId}", exc)
-                runOnUiThread {
-                    status.text = "Reframing failed: ${exc.message}"
-                }
-            }
-        }
+        Log.i(TAG, "Ingest progressive start localPhotoId=${photo.photoId} uri=$localUri")
+        showViewer(photo.copy(hasSplat = true, imported = true, splatStreamUrl = null, splatUrl = null))
     }
 
     private fun showReframingLoading(photo: AlbumPhoto): TextView {
@@ -1654,8 +1629,9 @@ class MainActivity : Activity() {
             photo.camCx,
             photo.camCy,
             photo.splatStreamUrl,
+            photo.localUri?.takeIf { photo.imported }?.toString(),
             splatCacheMaxBytesOverride,
-            networkStreamEnabled = !photo.imported
+            networkStreamEnabled = !photo.imported || photo.localUri != null
         )
         glView = viewer
 
