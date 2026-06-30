@@ -2,11 +2,13 @@ package com.wici.androidalbumdemo
 
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
+import android.Manifest
 import android.app.Activity
 import android.content.res.ColorStateList
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -20,6 +22,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -52,6 +55,7 @@ import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -64,6 +68,8 @@ class MainActivity : Activity() {
     private lateinit var generateLabel: TextView
     private lateinit var generateSpinner: ProgressBar
     private val networkExecutor = Executors.newSingleThreadExecutor()
+    private val previewBakeExecutor = Executors.newFixedThreadPool(PREVIEW_BAKE_CONCURRENCY)
+    private val previewBakeInFlight = ConcurrentHashMap.newKeySet<String>()
     private var assetName: String = "brush-clean-noshr-10k.ply"
     private var latestCapture: ReleaseCapture? = null
     private var difixDataUrl: String? = null
@@ -191,7 +197,7 @@ class MainActivity : Activity() {
             )
         )
         albumStatus = TextView(this).apply {
-            text = if (albumPhotos.isEmpty()) "LOADING GALLERY" else momentCountText()
+            text = if (albumPhotos.isEmpty()) "LOADING PHOTOS" else momentCountText()
             setTextColor(COLOR_INK_SOFT)
             textSize = 11f
             typeface = inter(600)
@@ -275,7 +281,7 @@ class MainActivity : Activity() {
         applyFullscreen(root)
         setContentView(root)
         if (albumPhotos.isEmpty()) {
-            fetchGalleryManifest()
+            loadDeviceAlbum()
         }
     }
 
@@ -318,6 +324,18 @@ class MainActivity : Activity() {
         addImportedPhotos(uris.distinct())
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_READ_PHOTOS) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            loadDeviceAlbum()
+        } else {
+            albumStatus?.text = "PHOTO ACCESS NEEDED"
+            albumAdapter?.setPhotos(importedPhotos)
+            albumPhotos = importedPhotos
+        }
+    }
+
     private fun addImportedPhotos(uris: List<Uri>) {
         if (uris.isEmpty()) return
         if (albumEditMode) exitAlbumEditMode()
@@ -339,35 +357,145 @@ class MainActivity : Activity() {
             )
         }
         importedPhotos.addAll(0, added)
-        val curated = albumPhotos.filterNot { it.imported }
-        albumPhotos = importedPhotos + curated
+        val importedIds = importedPhotos.map { it.photoId }.toSet()
+        albumPhotos = importedPhotos + albumPhotos.filterNot { it.photoId in importedIds }
         albumAdapter?.setPhotos(albumPhotos)
         albumStatus?.text = momentCountText()
         Log.i(TAG, "Imported local photos count=${added.size} totalImported=${importedPhotos.size}")
     }
 
-    private fun fetchGalleryManifest() {
+    private fun loadDeviceAlbum() {
         val requestSerial = ++galleryRequestSerial
-        albumStatus?.text = "LOADING GALLERY"
+        if (!hasPhotoLibraryPermission()) {
+            albumStatus?.text = if (shouldShowRequestPermissionRationale(photoLibraryPermission())) {
+                "ALLOW PHOTO ACCESS TO BUILD YOUR ALBUM"
+            } else {
+                "PHOTO ACCESS NEEDED"
+            }
+            requestPermissions(arrayOf(photoLibraryPermission()), REQUEST_READ_PHOTOS)
+            return
+        }
+        albumStatus?.text = "LOADING PHOTOS"
         networkExecutor.execute {
             try {
-                val text = getText("$GALLERY_URL/gallery", 8_000)
-                val parsed = parseGallery(JSONArray(text))
+                val parsed = queryDevicePhotos()
                 runOnUiThread {
                     if (requestSerial != galleryRequestSerial || viewerVisible) return@runOnUiThread
-                    albumPhotos = importedPhotos + parsed
+                    val importedUris = importedPhotos.mapNotNull { it.localUri?.toString() }.toSet()
+                    albumPhotos = importedPhotos + parsed.filterNot { it.localUri?.toString() in importedUris }
                     albumAdapter?.setPhotos(albumPhotos)
                     albumStatus?.text = momentCountText()
-                    Log.i(TAG, "Gallery loaded count=${parsed.size} imported=${importedPhotos.size}")
+                    Log.i(TAG, "Device photos loaded count=${parsed.size} imported=${importedPhotos.size}")
                 }
             } catch (exc: Exception) {
-                Log.w(TAG, "Gallery load failed", exc)
+                Log.w(TAG, "Device photo load failed", exc)
                 runOnUiThread {
                     if (requestSerial != galleryRequestSerial || viewerVisible) return@runOnUiThread
-                    albumStatus?.text = "GALLERY UNAVAILABLE"
+                    albumStatus?.text = "PHOTOS UNAVAILABLE"
                 }
             }
         }
+    }
+
+    private fun queryDevicePhotos(): List<AlbumPhoto> {
+        val photos = mutableListOf<AlbumPhoto>()
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+        val projection = mutableListOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.MIME_TYPE,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.Images.Media.WIDTH,
+            MediaStore.Images.Media.HEIGHT,
+            MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.Images.Media.DATE_ADDED
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            projection += MediaStore.Images.Media.RELATIVE_PATH
+        }
+        val sort = "${MediaStore.Images.Media.DATE_TAKEN} DESC, ${MediaStore.Images.Media.DATE_ADDED} DESC"
+        contentResolver.query(collection, projection.toTypedArray(), null, null, sort)?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
+            val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            val widthCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
+            val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
+            val relativeCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
+            while (cursor.moveToNext() && photos.size < DEVICE_PHOTO_LIMIT) {
+                val id = cursor.getLong(idCol)
+                val displayName = cursor.getString(nameCol).orEmpty()
+                val mime = cursor.getString(mimeCol).orEmpty()
+                val bucket = cursor.getString(bucketCol).orEmpty()
+                val relativePath = if (relativeCol >= 0) cursor.getString(relativeCol).orEmpty() else ""
+                val width = cursor.getInt(widthCol).takeIf { it > 0 }
+                val height = cursor.getInt(heightCol).takeIf { it > 0 }
+                if (isFilteredDeviceImage(bucket, relativePath, displayName, mime, width, height)) continue
+                val photoId = "device-$id"
+                val uri = Uri.withAppendedPath(collection, id.toString())
+                val cachedPreview = orbitPreviewCacheFile(photoId).takeIf { it.length() > 0L }
+                photos += AlbumPhoto(
+                    photoId = photoId,
+                    thumbnailUrl = uri.toString(),
+                    hasOrbit = cachedPreview != null,
+                    hasSplat = false,
+                    sourceWidth = width,
+                    sourceHeight = height,
+                    camFx = null,
+                    camFy = null,
+                    camCx = null,
+                    camCy = null,
+                    orbitWebpUrl = cachedPreview?.toURI()?.toString(),
+                    localUri = uri,
+                    imported = true
+                )
+            }
+        }
+        return photos
+    }
+
+    private fun isFilteredDeviceImage(
+        bucket: String,
+        relativePath: String,
+        displayName: String,
+        mime: String,
+        width: Int?,
+        height: Int?
+    ): Boolean {
+        if (!mime.startsWith("image/", ignoreCase = true)) return true
+        if (mime.contains("gif", ignoreCase = true) || mime.contains("svg", ignoreCase = true)) return true
+        val bucketLower = bucket.lowercase()
+        val pathLower = relativePath.lowercase()
+        val nameLower = displayName.lowercase()
+        if (bucketLower == "screenshots" || bucketLower == "screenshot") return true
+        if (bucketLower == "download" || bucketLower == "downloads") return true
+        if ("screenshots" in pathLower || "screenshot" in pathLower) return true
+        if ("screenrecord" in pathLower || "screen_record" in pathLower || "captures" in pathLower) return true
+        if (pathLower.startsWith("download") || "/download" in pathLower) return true
+        if (nameLower.startsWith("screenshot") || nameLower.startsWith("screen_shot")) return true
+        if ("screenrecord" in nameLower || "screen_record" in nameLower) return true
+        val rootPng = mime.equals("image/png", ignoreCase = true) &&
+            (bucketLower.isBlank() || bucketLower == "null") &&
+            (pathLower.isBlank() || pathLower == "/" || pathLower == "null")
+        if (rootPng) return true
+        if (mime.equals("image/png", ignoreCase = true) && looksLikePhoneScreenshot(width, height)) return true
+        return false
+    }
+
+    private fun looksLikePhoneScreenshot(width: Int?, height: Int?): Boolean {
+        if (width == null || height == null) return false
+        val shortSide = min(width, height)
+        val longSide = maxOf(width, height)
+        val aspect = longSide.toFloat() / shortSide.toFloat()
+        return shortSide in 1000..1450 && longSide in 1900..2600 && aspect > 1.55f
     }
 
     private fun parseGallery(array: JSONArray): List<AlbumPhoto> {
@@ -435,7 +563,7 @@ class MainActivity : Activity() {
             val position = grid.firstVisiblePosition + i
             val view = grid.getChildAt(i) as? AlbumCellView ?: continue
             val photo = adapter.photoAt(position) ?: continue
-            if (!photo.hasOrbit) {
+            if (!canPreviewPhoto(photo)) {
                 stopCellPreview(view, reason = "no-orbit")
                 continue
             }
@@ -507,10 +635,18 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun cachedOrbitPreview(photoId: String, url: String): File {
+    private fun canPreviewPhoto(photo: AlbumPhoto): Boolean =
+        photo.hasOrbit || (photo.imported && photo.localUri != null)
+
+    private fun orbitPreviewCacheFile(photoId: String): File {
         val safeId = photoId.replace(Regex("[^A-Za-z0-9_.-]+"), "-")
-        val file = File(cacheDir, "orbit-preview-$safeId-$ORBIT_PREVIEW_CACHE_VERSION.webp")
+        return File(cacheDir, "orbit-preview-$safeId-$ORBIT_PREVIEW_CACHE_VERSION.webp")
+    }
+
+    private fun cachedOrbitPreview(photoId: String, url: String): File {
+        val file = orbitPreviewCacheFile(photoId)
         if (file.length() > 0L) {
+            file.setLastModified(System.currentTimeMillis())
             Log.i(
                 PREVIEW_TAG,
                 "Orbit preview cache hit photoId=$photoId version=$ORBIT_PREVIEW_CACHE_VERSION bytes=${file.length()}"
@@ -541,6 +677,141 @@ class MainActivity : Activity() {
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
         Log.i(PREVIEW_TAG, "Orbit preview cached photoId=$photoId bytes=${file.length()} elapsedMs=$elapsedMs")
         return file
+    }
+
+    private fun enqueueDeviceOrbitPreviewBake(cell: AlbumCellView, photo: AlbumPhoto) {
+        val imageUri = photo.localUri ?: return
+        val cached = orbitPreviewCacheFile(photo.photoId)
+        if (cached.length() > 0L) {
+            val updated = photo.copy(hasOrbit = true, orbitWebpUrl = cached.toURI().toString())
+            updateAlbumPhoto(updated)
+            val url = loadOrbitPreview(updated) ?: return
+            startOrbitPreview(cell, updated, url, previewRequestSerial)
+            return
+        }
+        if (!previewBakeInFlight.add(photo.photoId)) {
+            Log.i(PREVIEW_TAG, "Orbit preview bake already in flight photoId=${photo.photoId}")
+            return
+        }
+        val requestSerial = previewRequestSerial
+        val runSerial = cascadeRunSerial
+        Log.i(
+            PREVIEW_TAG,
+            "Orbit preview bake enqueue photoId=${photo.photoId} ordinal=${cell.cascadeOrdinal} " +
+                "visibleOnly=true inFlight=${previewBakeInFlight.size}"
+        )
+        previewBakeExecutor.execute {
+            try {
+                val started = SystemClock.elapsedRealtime()
+                val file = postIngestPreviewWebp(photo, imageUri, cached)
+                pruneOrbitPreviewCache()
+                val elapsed = SystemClock.elapsedRealtime() - started
+                runOnUiThread {
+                    val updated = photo.copy(hasOrbit = true, orbitWebpUrl = file.toURI().toString())
+                    updateAlbumPhoto(updated)
+                    Log.i(
+                        PREVIEW_TAG,
+                        "Orbit preview bake done photoId=${photo.photoId} bytes=${file.length()} " +
+                            "elapsedMs=$elapsed inFlight=${previewBakeInFlight.size}"
+                    )
+                    if (
+                        requestSerial == previewRequestSerial &&
+                        runSerial == cascadeRunSerial &&
+                        previewEnabled &&
+                        cell.boundPhotoId == updated.photoId &&
+                        isCellStillVisible(cell)
+                    ) {
+                        val url = loadOrbitPreview(updated)
+                        if (url != null) startOrbitPreview(cell, updated, url, requestSerial)
+                    } else if (previewEnabled) {
+                        refreshVisibleOrbitPreviews()
+                    }
+                }
+            } catch (exc: Exception) {
+                Log.w(PREVIEW_TAG, "Orbit preview bake failed photoId=${photo.photoId}: ${exc.message}", exc)
+            } finally {
+                previewBakeInFlight.remove(photo.photoId)
+            }
+        }
+    }
+
+    private fun updateAlbumPhoto(updated: AlbumPhoto) {
+        albumPhotos = albumPhotos.map { if (it.photoId == updated.photoId) updated else it }
+        albumAdapter?.rememberUpdatedPhoto(updated)
+        val importedIndex = importedPhotos.indexOfFirst { it.photoId == updated.photoId }
+        if (importedIndex >= 0) importedPhotos[importedIndex] = updated
+    }
+
+    private fun postIngestPreviewWebp(photo: AlbumPhoto, imageUri: Uri, outFile: File): File {
+        outFile.parentFile?.mkdirs()
+        val boundary = "----WiciAndroidPreview${SystemClock.elapsedRealtimeNanos()}"
+        val mime = contentResolver.getType(imageUri) ?: "image/jpeg"
+        val filename = "android-preview-${System.currentTimeMillis()}.${extensionForMime(mime)}"
+        val tmp = File(outFile.parentFile, "${outFile.name}.tmp-${SystemClock.elapsedRealtimeNanos()}")
+        val conn = (URL("$GALLERY_URL/ingest_preview").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 8_000
+            readTimeout = 120_000
+            doOutput = true
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setRequestProperty("Accept", "image/webp")
+        }
+        try {
+            conn.outputStream.use { out ->
+                writeMultipartText(out, boundary, "photoId", photo.photoId)
+                writeMultipartText(out, boundary, "title", photo.photoId)
+                out.writeUtf8("--$boundary\r\n")
+                out.writeUtf8("Content-Disposition: form-data; name=\"image\"; filename=\"$filename\"\r\n")
+                out.writeUtf8("Content-Type: $mime\r\n\r\n")
+                contentResolver.openInputStream(imageUri).use { input ->
+                    requireNotNull(input) { "openInputStream returned null" }
+                    input.copyTo(out)
+                }
+                out.writeUtf8("\r\n--$boundary--\r\n")
+            }
+            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            if (conn.responseCode !in 200..299) {
+                val text = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+                throw RuntimeException("HTTP ${conn.responseCode}: ${text.take(220)}")
+            }
+            val contentType = conn.contentType.orEmpty()
+            if (!contentType.contains("image/webp", ignoreCase = true)) {
+                Log.w(PREVIEW_TAG, "ingest_preview contentType=$contentType for photoId=${photo.photoId}")
+            }
+            tmp.outputStream().use { out ->
+                requireNotNull(stream) { "ingest_preview response body missing" }.use { input -> input.copyTo(out) }
+            }
+            if (tmp.length() <= 0L) throw RuntimeException("empty ingest_preview response")
+            if (!tmp.renameTo(outFile)) {
+                tmp.copyTo(outFile, overwrite = true)
+                tmp.delete()
+            }
+            Log.i(
+                PREVIEW_TAG,
+                "Orbit preview bake cached photoId=${photo.photoId} bytes=${outFile.length()} " +
+                    "serverTiming=${conn.headerString("X-Orbit-Timing-Json")?.take(180)}"
+            )
+            return outFile
+        } finally {
+            if (tmp.exists()) tmp.delete()
+            conn.disconnect()
+        }
+    }
+
+    private fun pruneOrbitPreviewCache() {
+        val files = cacheDir.listFiles { file ->
+            file.isFile && file.name.startsWith("orbit-preview-") && file.name.endsWith(".webp")
+        }?.toList().orEmpty()
+        var total = files.sumOf { it.length() }
+        if (total <= ORBIT_PREVIEW_CACHE_MAX_BYTES) return
+        for (file in files.sortedBy { it.lastModified() }) {
+            if (total <= ORBIT_PREVIEW_CACHE_MAX_BYTES) break
+            val size = file.length()
+            if (file.delete()) {
+                total -= size
+                Log.i(PREVIEW_TAG, "Orbit preview cache evict file=${file.name} bytes=$size total=$total")
+            }
+        }
     }
 
     private fun decodeOrbitPreview(file: File): Drawable =
@@ -611,7 +882,7 @@ class MainActivity : Activity() {
                 null
             }
             ?: return null
-        val absolute = absoluteGalleryUrl(url)
+        val absolute = if (url.startsWith("file:")) url else absoluteGalleryUrl(url)
         val separator = if (absolute.contains("?")) "&" else "?"
         return "$absolute${separator}v=$ORBIT_PREVIEW_CACHE_VERSION"
     }
@@ -763,6 +1034,10 @@ class MainActivity : Activity() {
             notifyDataSetChanged()
         }
 
+        fun rememberUpdatedPhoto(updated: AlbumPhoto) {
+            photos = photos.map { if (it.photoId == updated.photoId) updated else it }
+        }
+
         fun photoAt(position: Int): AlbumPhoto? =
             photos.getOrNull(position - 1)
 
@@ -828,7 +1103,7 @@ class MainActivity : Activity() {
             cell.isClickable = true
             cell.isFocusable = true
             cell.setOnClickListener {
-                if (!albumEditMode) showPhotoScreen(photo)
+                if (!albumEditMode) beginReframing(photo)
             }
             cell.setOnLongClickListener {
                 enterAlbumEditMode()
@@ -848,11 +1123,15 @@ class MainActivity : Activity() {
         }
 
         fun updatePreviewForCell(cell: AlbumCellView, photo: AlbumPhoto) {
-            if (!previewEnabled || !photo.hasOrbit) {
+            if (!previewEnabled || !canPreviewPhoto(photo)) {
                 stopCellPreview(cell)
                 return
             }
-            val url = loadOrbitPreview(photo) ?: return
+            val url = loadOrbitPreview(photo)
+            if (url == null) {
+                enqueueDeviceOrbitPreviewBake(cell, photo)
+                return
+            }
             startOrbitPreview(cell, photo, url, previewRequestSerial)
         }
     }
@@ -1073,7 +1352,7 @@ class MainActivity : Activity() {
             setPadding(dp(28), dp(14), dp(28), dp(14))
             background = roundedState(COLOR_SURFACE, 0xFFF6F7FA.toInt(), dp(24).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
             applySoftShadow(this, 4)
-            setOnClickListener { beginReframing(photo, status, this) }
+            setOnClickListener { beginReframing(photo) }
         }
 
         val root = FrameLayout(this).apply {
@@ -1142,7 +1421,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun beginReframing(photo: AlbumPhoto, status: TextView, button: View) {
+    private fun beginReframing(photo: AlbumPhoto) {
         if (!photo.imported && photo.hasSplat) {
             showViewer(photo)
             return
@@ -1158,11 +1437,11 @@ class MainActivity : Activity() {
             Log.i(TAG, "Imported Reframing cache miss photoId=${photo.photoId} key=$cacheKey; re-ingesting")
         }
         if (localUri == null) {
-            setInlineStatus(status, "3D view unavailable")
+            showStaticPhoto(photo)
             return
         }
-        button.isEnabled = false
-        setInlineStatus(status, "Reframing...")
+        val status = showReframingLoading(photo)
+        status.text = "Reframing..."
         Log.i(TAG, "Ingest start localPhotoId=${photo.photoId} uri=$localUri")
         networkExecutor.execute {
             try {
@@ -1178,22 +1457,81 @@ class MainActivity : Activity() {
                         "elapsedMs=$elapsed"
                 )
                 runOnUiThread {
-                    setInlineStatus(status, "Reframing done in ${elapsed}ms")
+                    status.text = "Reframing done"
                     showViewer(baked)
                 }
             } catch (exc: Exception) {
                 Log.e(TAG, "Ingest failed localPhotoId=${photo.photoId}", exc)
                 runOnUiThread {
-                    setInlineStatus(status, "Reframing failed: ${exc.message}")
-                    button.isEnabled = true
+                    status.text = "Reframing failed: ${exc.message}"
                 }
             }
         }
     }
 
+    private fun showReframingLoading(photo: AlbumPhoto): TextView {
+        viewerVisible = true
+        previewEnabled = false
+        glView?.shutdown()
+        glView?.onPause()
+        glView = null
+        latestCapture = null
+        difixDataUrl = null
+        fluxDataUrl = null
+        finalBitmap = null
+        previewRequestSerial++
+        cascadeRunSerial++
+        previewHandler.removeCallbacksAndMessages(null)
+        albumGrid?.let { grid ->
+            for (i in 0 until grid.childCount) {
+                stopCellPreview(grid.getChildAt(i), reason = "reframing")
+            }
+        }
+
+        val status = TextView(this).apply {
+            setTextColor(COLOR_INK_SOFT)
+            text = "Reframing..."
+            textSize = 15f
+            typeface = inter(600)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        val spinner = ProgressBar(this, null, android.R.attr.progressBarStyleLarge).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(COLOR_INK_SOFT)
+        }
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(20), dp(18), dp(20), dp(18))
+            addView(spinner, LinearLayout.LayoutParams(dp(34), dp(34)).apply { bottomMargin = dp(14) })
+            addView(status, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = 0
+            })
+        }
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+            addView(
+                studioBackButton(),
+                FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.TOP).apply {
+                    topMargin = dp(26)
+                    leftMargin = dp(18)
+                }
+            )
+            addView(
+                stack,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            )
+        }
+        applyFullscreen(root)
+        setContentView(root)
+        Log.i(TAG, "Reframing screen photoId=${photo.photoId}")
+        return status
+    }
+
     private fun showViewer(photo: AlbumPhoto) {
         if (!photo.hasSplat) {
-            showPhotoScreen(photo)
+            if (photo.localUri != null) beginReframing(photo) else showStaticPhoto(photo)
             return
         }
         viewerVisible = true
@@ -1388,6 +1726,7 @@ class MainActivity : Activity() {
         previewHandler.removeCallbacksAndMessages(null)
         glView?.shutdown()
         networkExecutor.shutdownNow()
+        previewBakeExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -1883,8 +2222,10 @@ class MainActivity : Activity() {
         } else {
             importedPhotos.add(0, next)
         }
-        val curated = albumPhotos.filterNot { it.imported || it.photoId == oldPhotoId || it.photoId == next.photoId }
-        albumPhotos = importedPhotos + curated
+        val importedIds = importedPhotos.map { it.photoId }.toSet()
+        albumPhotos = importedPhotos + albumPhotos.filterNot {
+            it.photoId == oldPhotoId || it.photoId == next.photoId || it.photoId in importedIds
+        }
         thumbnailCache.remove(oldPhotoId)
         albumAdapter?.setPhotos(albumPhotos)
         albumStatus?.text = momentCountText()
@@ -2070,10 +2411,22 @@ class MainActivity : Activity() {
         val hasDifix = difixDataUrl != null
         val hasFlux = fluxDataUrl != null
         when {
-            fluxBusy -> styleStageButton("Generating...", enabled = false, busy = true)
-            hasFlux && displayMode == DisplayMode.FLUX -> styleStageButton("Download", enabled = true, busy = false)
-            hasDifix && displayMode == DisplayMode.DIFIX -> styleStageButton("Generate", enabled = true, busy = false)
-            else -> styleStageButton("Generate", enabled = false, busy = false)
+            fluxBusy -> {
+                generateButton.visibility = View.VISIBLE
+                styleStageButton("Generating...", enabled = false, busy = true)
+            }
+            hasFlux && displayMode == DisplayMode.FLUX -> {
+                generateButton.visibility = View.VISIBLE
+                styleStageButton("Download", enabled = true, busy = false)
+            }
+            hasDifix && displayMode == DisplayMode.DIFIX -> {
+                generateButton.visibility = View.VISIBLE
+                styleStageButton("Generate", enabled = true, busy = false)
+            }
+            else -> {
+                generateButton.visibility = View.GONE
+                styleStageButton("Generate", enabled = false, busy = false)
+            }
         }
     }
 
@@ -2235,6 +2588,20 @@ class MainActivity : Activity() {
             null
         }
 
+    private fun photoLibraryPermission(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+
+    private fun hasPhotoLibraryPermission(): Boolean =
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            true
+        } else {
+            checkSelfPermission(photoLibraryPermission()) == PackageManager.PERMISSION_GRANTED
+        }
+
     private fun sourceDimsFromIntent(): Pair<Int, Int>? {
         val width = intent.getIntExtra("sourceWidth", 0).takeIf { it > 0 }
             ?: intent.getIntExtra("width", 0).takeIf { it > 0 }
@@ -2387,13 +2754,17 @@ class MainActivity : Activity() {
         private const val GALLERY_URL = "http://47.186.21.5:54228/orbit"
         private const val ORBIT_PREVIEW_URL = "http://47.186.21.5:54228/orbit/orbit_preview"
         private const val ORBIT_PREVIEW_CACHE_VERSION = "webp360-v1"
+        private const val ORBIT_PREVIEW_CACHE_MAX_BYTES = 96L * 1024L * 1024L
+        private const val PREVIEW_BAKE_CONCURRENCY = 3
         private const val DEFAULT_SPLAT_DENSITY = "full"
         private const val SPLAT_ROW_BYTES = 32
         private const val PREVIEW_CASCADE_STAGGER_MS = 120L
         private const val PREVIEW_REVEAL_MS = 300L
         private const val PREVIEW_REVEAL_START_SCALE = 0.96f
         private const val REQUEST_PICK_IMAGES = 4201
+        private const val REQUEST_READ_PHOTOS = 4202
         private const val PICK_IMAGES_MAX = 100
+        private const val DEVICE_PHOTO_LIMIT = 600
         private const val THUMBNAIL_MAX_SIDE = 720
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
     }

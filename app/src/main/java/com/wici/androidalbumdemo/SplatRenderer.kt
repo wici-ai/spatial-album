@@ -1169,6 +1169,7 @@ class SplatRenderer(
         val covariances = FloatArray(count * 6)
         val buffer = ByteBuffer.wrap(bytes, 0, byteCount).order(ByteOrder.LITTLE_ENDIAN)
         var invalid = 0
+        var out = 0
         for (i in 0 until count) {
             val rawX = buffer.float
             val rawY = buffer.float
@@ -1197,18 +1198,39 @@ class SplatRenderer(
             val qy = ((buffer.get().toInt() and 0xff) - 128) / 128f
             val qz = ((buffer.get().toInt() and 0xff) - 128) / 128f
 
-            val p = i * 3
+            // Match the web GaussianSplats3D splatAlphaRemovalThreshold (=5): drop near-transparent
+            // splats. The hand-rolled renderer otherwise floors every alpha to 0.02 and draws even
+            // a=0 splats, so the faint peripheral splats accumulate into a low-quality smear under
+            // orbit. Dropping them leaves that region empty so it reads as a hole -> peripheral mask
+            // -> flux regenerates it cleanly, matching the web.
+            if (a < SPLAT_ALPHA_REMOVAL_THRESHOLD) continue
+
+            val p = out * 3
             centers[p] = x
             centers[p + 1] = y
             centers[p + 2] = z
-            val c = i * 4
+            val c = out * 4
             colors[c] = r / 255f
             colors[c + 1] = g / 255f
             colors[c + 2] = b / 255f
             colors[c + 3] = (a / 255f).coerceIn(0.02f, 0.98f)
-            writeCovarianceFromDirectScales(covariances, i * 6, sx, sy, sz, qw, qx, qy, qz)
+            writeCovarianceFromDirectScales(covariances, out * 6, sx, sy, sz, qw, qx, qy, qz)
+            out++
         }
-        return SplatBatch(centers, colors, covariances, count, invalid, receivedCount, expectedCount, complete)
+        return if (out == count) {
+            SplatBatch(centers, colors, covariances, count, invalid, receivedCount, expectedCount, complete)
+        } else {
+            SplatBatch(
+                centers.copyOf(out * 3),
+                colors.copyOf(out * 4),
+                covariances.copyOf(out * 6),
+                out,
+                invalid,
+                receivedCount,
+                expectedCount,
+                complete
+            )
+        }
     }
 
     private fun finiteOr(value: Float, fallback: Float): Float =
@@ -1694,7 +1716,14 @@ class SplatRenderer(
                 val sb = fboPixels[src + 2].toInt() and 0xff
                 val sa = fboPixels[src + 3].toInt() and 0xff
                 seedArgb[dst] = -0x1000000 or (sr shl 16) or (sg shl 8) or sb
-                if (sa <= ALPHA_HOLE_THRESHOLD) {
+                // Hole = the splat coverage lets the background show through by more than the
+                // tolerance, i.e. coverage < ~97%. This mirrors the web reference exactly: the web's
+                // black-vs-magenta render diff equals (255 - alpha), so testing (255 - sa) here gives
+                // the same gap without a second render. The old sa<=8 test only caught the fully
+                // empty core and missed the sparse splat-thinning disocclusion boundary, making the
+                // phone's peripheral mask smaller than the web's (difix then refined that low-quality
+                // fringe instead of letting flux regenerate it).
+                if (255 - sa > MASK_TOLERANCE) {
                     gap[dst] = 1
                     gapPx++
                 } else {
@@ -1708,7 +1737,15 @@ class SplatRenderer(
             }
         }
 
-        val peripheral = floodBorder(gap, captureW, captureH)
+        // Align mask construction with the web reference: clean the raw coverage gap with the same
+        // morphological pipeline (removeSmall -> dilate -> erode -> removeSmall) before classifying.
+        // The phone previously skipped this, so its peripheral/refine masks were raw and jagged and
+        // diverged from the web's for the same view. Parameters scale with capture resolution.
+        val cleanedGap = cleanGapMask(gap, captureW, captureH)
+        gapPx = 0
+        for (i in 0 until total) if (cleanedGap[i].toInt() != 0) gapPx++
+        coveredPx = total - gapPx
+        val peripheral = floodBorder(cleanedGap, captureW, captureH)
         val refine = ByteArray(total)
         var peripheralPx = 0
         var interiorPx = 0
@@ -1718,7 +1755,7 @@ class SplatRenderer(
                 refine[i] = 0
             } else {
                 refine[i] = 1
-                if (gap[i].toInt() != 0) interiorPx++
+                if (cleanedGap[i].toInt() != 0) interiorPx++
             }
         }
 
@@ -1752,7 +1789,7 @@ class SplatRenderer(
             peripheralPx = peripheralPx,
             interiorPx = interiorPx,
             coveredPx = coveredPx,
-            alphaThreshold = ALPHA_HOLE_THRESHOLD,
+            alphaThreshold = MASK_TOLERANCE,
             releaseMaxSide = RELEASE_MAX_SIDE
         )
     }
@@ -1798,6 +1835,81 @@ class SplatRenderer(
         return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
     }
 
+    // Port of the web reference gap cleanup (buildGapMask). The web tunes removeSmall(80) ->
+    // dilate(2) -> erode(1) -> removeSmall(120) for a 960-px longest side; scale those to this
+    // capture's native resolution so the physical morphology matches. Linear ops scale by
+    // refScale, area thresholds by refScale^2.
+    private fun cleanGapMask(raw: ByteArray, w: Int, h: Int): ByteArray {
+        val refScale = max(w, h).toFloat() / RELEASE_MAX_SIDE.toFloat()
+        val area1 = Math.round(80f * refScale * refScale)
+        val dilateIt = max(1, Math.round(2f * refScale))
+        val erodeIt = max(1, Math.round(1f * refScale))
+        val area2 = Math.round(120f * refScale * refScale)
+        var g = removeSmallComponents(raw, w, h, area1)
+        g = dilate4(g, w, h, dilateIt)
+        g = erode4(g, w, h, erodeIt)
+        return removeSmallComponents(g, w, h, area2)
+    }
+
+    private fun dilate4(mask: ByteArray, w: Int, h: Int, iterations: Int): ByteArray {
+        var cur = mask
+        val n = w * h
+        repeat(iterations) {
+            val out = cur.copyOf()
+            for (i in 0 until n) {
+                if (cur[i].toInt() == 0) continue
+                val x = i % w
+                if (i >= w) out[i - w] = 1
+                if (i < n - w) out[i + w] = 1
+                if (x > 0) out[i - 1] = 1
+                if (x < w - 1) out[i + 1] = 1
+            }
+            cur = out
+        }
+        return cur
+    }
+
+    private fun erode4(mask: ByteArray, w: Int, h: Int, iterations: Int): ByteArray {
+        val inv = ByteArray(mask.size)
+        for (i in mask.indices) inv[i] = if (mask[i].toInt() != 0) 0.toByte() else 1.toByte()
+        val grown = dilate4(inv, w, h, iterations)
+        val out = ByteArray(mask.size)
+        for (i in mask.indices) out[i] = if (grown[i].toInt() != 0) 0.toByte() else 1.toByte()
+        return out
+    }
+
+    private fun removeSmallComponents(mask: ByteArray, w: Int, h: Int, minArea: Int): ByteArray {
+        if (minArea <= 1) return mask.copyOf()
+        val n = w * h
+        val seen = ByteArray(n)
+        val out = ByteArray(n)
+        val queue = IntArray(n)
+        val comp = IntArray(n)
+        for (start in 0 until n) {
+            if (mask[start].toInt() == 0 || seen[start].toInt() != 0) continue
+            var head = 0
+            var tail = 0
+            var compLen = 0
+            queue[tail++] = start
+            seen[start] = 1
+            while (head < tail) {
+                val idx = queue[head++]
+                comp[compLen++] = idx
+                val x = idx % w
+                val up = idx - w
+                val down = idx + w
+                if (up >= 0 && mask[up].toInt() != 0 && seen[up].toInt() == 0) { seen[up] = 1; queue[tail++] = up }
+                if (down < n && mask[down].toInt() != 0 && seen[down].toInt() == 0) { seen[down] = 1; queue[tail++] = down }
+                if (x > 0 && mask[idx - 1].toInt() != 0 && seen[idx - 1].toInt() == 0) { seen[idx - 1] = 1; queue[tail++] = idx - 1 }
+                if (x < w - 1 && mask[idx + 1].toInt() != 0 && seen[idx + 1].toInt() == 0) { seen[idx + 1] = 1; queue[tail++] = idx + 1 }
+            }
+            if (compLen >= minArea) {
+                for (i in 0 until compLen) out[comp[i]] = 1
+            }
+        }
+        return out
+    }
+
     private fun bitmapDataUrl(bitmap: Bitmap, format: Bitmap.CompressFormat, quality: Int): String {
         val out = ByteArrayOutputStream()
         bitmap.compress(format, quality, out)
@@ -1830,6 +1942,9 @@ class SplatRenderer(
         private const val TAG = "AlbumGLESPerf"
         private const val SPLAT_STREAM_URL = "http://47.186.21.5:54228/orbit/splat_stream"
         private const val SPLAT_ROW_BYTES = 32
+        // Mirror the web viewer's GaussianSplats3D splatAlphaRemovalThreshold (SPLAT_ALPHA_THRESHOLD=5):
+        // splats with stored alpha below this are dropped at parse time.
+        private const val SPLAT_ALPHA_REMOVAL_THRESHOLD = 5
         private const val STREAM_BATCH_RECORDS = 32_768
         private const val STREAM_READ_BYTES = 128 * 1024
         private const val INSTANCE_FLOATS = 14
@@ -1844,7 +1959,7 @@ class SplatRenderer(
         private const val SORT_THRESHOLD_RAD = 0.06f
         private const val PYRAMID_LEVELS = 11
         private const val FINAL_DILATION_PX = 5.0f
-        private const val ALPHA_HOLE_THRESHOLD = 8
+        private const val MASK_TOLERANCE = 8
         private const val RELEASE_MAX_SIDE = 960
         private const val NEAR_PLANE = 0.02f
         private const val FAR_PLANE = 500f
