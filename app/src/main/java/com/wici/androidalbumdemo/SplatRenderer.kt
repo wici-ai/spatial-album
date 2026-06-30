@@ -1111,6 +1111,7 @@ class SplatRenderer(
                 setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
                 setRequestProperty("Accept", "application/octet-stream")
                 setRequestProperty(INGEST_SPLAT_ACCEPT_HEADER, "$INGEST_SPLAT_FORMAT_FP16_V1,gzip")
+                setRequestProperty(INGEST_SPLAT_STREAM_HEADER, "chunked")
             }
             streamConnection = conn
             conn.outputStream.use { out ->
@@ -2208,6 +2209,7 @@ class SplatRenderer(
         private const val SPLAT_STREAM_URL = "http://47.186.21.5:54228/orbit/splat_stream"
         private const val INGEST_URL = "http://47.186.21.5:54228/orbit/ingest"
         private const val INGEST_SPLAT_ACCEPT_HEADER = "X-Wici-Splat-Accept"
+        private const val INGEST_SPLAT_STREAM_HEADER = "X-Wici-Splat-Stream"
         private const val INGEST_SPLAT_FORMAT_FP16_V1 = "fp16v1"
         private const val INGEST_UPLOAD_MAX_SIDE = 1536
         private const val INGEST_UPLOAD_JPEG_QUALITY = 90
