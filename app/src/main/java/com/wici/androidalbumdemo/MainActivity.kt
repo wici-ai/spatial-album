@@ -3035,7 +3035,7 @@ class MainActivity : Activity() {
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
         private const val PREVIEW_UPLOAD_MAX_SIDE = 1536
         private const val PREVIEW_UPLOAD_JPEG_QUALITY = 90
-        private const val DIFIX_SOURCE_UPLOAD_MAX_SIDE = PREVIEW_UPLOAD_MAX_SIDE
+        private const val DIFIX_SOURCE_UPLOAD_MAX_SIDE = 960
         private const val DIFIX_SOURCE_UPLOAD_JPEG_QUALITY = PREVIEW_UPLOAD_JPEG_QUALITY
     }
 }
