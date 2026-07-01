@@ -92,6 +92,8 @@ class MainActivity : Activity() {
     private var displayMode = DisplayMode.RAW
     private var difixBusy = false
     private var fluxBusy = false
+    private var viewerRoot: FrameLayout? = null
+    private var generateErrorOverlay: View? = null
     private var releaseCaptureEnabled = true
     private var postPassEnabled = true
     private var streamDensityOverride: String? = null
@@ -182,6 +184,8 @@ class MainActivity : Activity() {
         glView?.shutdown()
         glView?.onPause()
         glView = null
+        viewerRoot = null
+        generateErrorOverlay = null
         previewRequestSerial++
         cascadeRunSerial++
         previewHandler.removeCallbacksAndMessages(null)
@@ -1469,6 +1473,8 @@ class MainActivity : Activity() {
         glView?.shutdown()
         glView?.onPause()
         glView = null
+        viewerRoot = null
+        generateErrorOverlay = null
         latestCapture = null
         difixDataUrl = null
         fluxDataUrl = null
@@ -1647,6 +1653,8 @@ class MainActivity : Activity() {
         glView?.shutdown()
         glView?.onPause()
         glView = null
+        viewerRoot = null
+        generateErrorOverlay = null
         latestCapture = null
         difixDataUrl = null
         fluxDataUrl = null
@@ -1707,11 +1715,18 @@ class MainActivity : Activity() {
         val elapsedMs: Long
     )
 
-    private fun checkOrbitHealth(baseUrl: String): BackendHealthResult {
+    private data class GenerateHealthResult(
+        val ok: Boolean,
+        val service: String?,
+        val message: String,
+        val elapsedMs: Long
+    )
+
+    private fun checkBackendServiceHealth(baseUrl: String, service: String): BackendHealthResult {
         val started = SystemClock.elapsedRealtimeNanos()
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL("$baseUrl/orbit/health").openConnection() as HttpURLConnection).apply {
+            conn = (URL("$baseUrl/$service/health").openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = BACKEND_HEALTH_TIMEOUT_MS
                 readTimeout = BACKEND_HEALTH_TIMEOUT_MS
@@ -1727,6 +1742,22 @@ class MainActivity : Activity() {
         } finally {
             conn?.disconnect()
         }
+    }
+
+    private fun checkOrbitHealth(baseUrl: String): BackendHealthResult =
+        checkBackendServiceHealth(baseUrl, "orbit")
+
+    private fun checkGenerateHealth(baseUrl: String): GenerateHealthResult {
+        val started = SystemClock.elapsedRealtimeNanos()
+        val difix = checkBackendServiceHealth(baseUrl, "difix")
+        if (!difix.ok) {
+            return GenerateHealthResult(false, "Difix", difix.message, elapsedMs(started))
+        }
+        val flux = checkBackendServiceHealth(baseUrl, "flux")
+        if (!flux.ok) {
+            return GenerateHealthResult(false, "FLUX", flux.message, elapsedMs(started))
+        }
+        return GenerateHealthResult(true, null, "ok", elapsedMs(started))
     }
 
     private fun shouldFallbackDiscoveredLocal(baseUrl: String): Boolean {
@@ -1846,6 +1877,122 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun clearGenerateErrorOverlay() {
+        val overlayView = generateErrorOverlay ?: return
+        (overlayView.parent as? ViewGroup)?.removeView(overlayView)
+        generateErrorOverlay = null
+    }
+
+    private fun showGenerateUnavailable(photo: AlbumPhoto, failedBaseUrl: String, stage: String, detail: String) {
+        val root = viewerRoot
+        if (root == null) {
+            showBackendUnavailable(photo, failedBaseUrl, stage, detail)
+            return
+        }
+        val fellBackToCloud = shouldFallbackDiscoveredLocal(failedBaseUrl)
+        if (fellBackToCloud) switchDiscoveredLocalToCloud(stage)
+        fluxBusy = false
+        difixBusy = false
+        clearGenerateErrorOverlay()
+        updateViewerControls()
+
+        val title = TextView(this).apply {
+            text = "Generate isn't available"
+            setTextColor(COLOR_INK)
+            textSize = 22f
+            typeface = spaceGrotesk(700)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        val hint = TextView(this).apply {
+            text = if (fellBackToCloud) {
+                "Local server can't finish generating. Retry will use WiCi Cloud."
+            } else {
+                "This server can't finish generating right now. Try again, or switch to the cloud server in Settings."
+            }
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 14f
+            typeface = inter(500)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setLineSpacing(dpFloat(2f), 1f)
+        }
+        val detailLine = TextView(this).apply {
+            text = backendAddressLabel(backendBaseUrl()).orEmpty()
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            ellipsize = TextUtils.TruncateAt.MIDDLE
+            setSingleLine(true)
+        }
+        val retry = TextView(this).apply {
+            text = "Retry"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            typeface = inter(700)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            minWidth = dp(132)
+            setPadding(dp(26), 0, dp(26), 0)
+            isClickable = true
+            isFocusable = true
+            background = roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(24).toFloat())
+            applySoftShadow(this, 4)
+            setOnClickListener {
+                clearGenerateErrorOverlay()
+                if (difixDataUrl != null && latestCapture != null) {
+                    displayMode = DisplayMode.DIFIX
+                    updateViewerControls()
+                    generateFlux()
+                } else {
+                    beginReframing(photo)
+                }
+            }
+        }
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(30), dp(30), dp(30), dp(30))
+            addView(title, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(hint, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            })
+            addView(detailLine, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            })
+            addView(retry, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)).apply {
+                topMargin = dp(22)
+            })
+        }
+        val errorView = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+            addView(
+                studioBackButton(),
+                FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.TOP).apply {
+                    topMargin = dp(26)
+                    leftMargin = dp(18)
+                }
+            )
+            addView(
+                stack,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                    leftMargin = dp(18)
+                    rightMargin = dp(18)
+                }
+            )
+        }
+        generateErrorOverlay = errorView
+        root.addView(errorView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        updateViewerControls()
+        Log.w(
+            TAG,
+            "Generate unavailable displayed photoId=${photo.photoId} stage=$stage failedBase=$failedBaseUrl " +
+                "fallbackCloud=$fellBackToCloud detail=${detail.take(180)} effective=${backendBaseUrl()}"
+        )
+    }
+
     private fun showViewer(photo: AlbumPhoto) {
         if (!photo.hasSplat) {
             if (photo.localUri != null) beginReframing(photo) else showStaticPhoto(photo)
@@ -1929,6 +2076,8 @@ class MainActivity : Activity() {
         val root = FrameLayout(this).apply {
             setBackgroundColor(COLOR_CANVAS)
         }
+        viewerRoot = root
+        generateErrorOverlay = null
         val viewerFrame = AspectFrameLayout(this, sourceAspect(photo)).apply {
             setBackgroundColor(COLOR_CANVAS)
         }
@@ -1988,6 +2137,8 @@ class MainActivity : Activity() {
         glView?.shutdown()
         glView?.onPause()
         glView = null
+        viewerRoot = null
+        generateErrorOverlay = null
         latestCapture = null
         difixDataUrl = null
         fluxDataUrl = null
@@ -2098,13 +2249,14 @@ class MainActivity : Activity() {
             setPipelineStatus("Captured ${capture.width}x${capture.height}; running Difix...")
         }
         difixBusy = true
+        val generateBackendBase = backendBaseUrl()
         networkExecutor.execute {
             try {
                 val flowStartNs = SystemClock.elapsedRealtimeNanos()
                 val bodyStartNs = SystemClock.elapsedRealtimeNanos()
                 val body = buildDifixMultipartBody(capture)
                 val bodyBuildMs = elapsedMs(bodyStartNs)
-                val postResult = postDifixMultipart("${difixUrl()}/refine", body, 240_000)
+                val postResult = postDifixMultipart("$generateBackendBase/difix/refine", body, 240_000)
                 val processStartNs = SystemClock.elapsedRealtimeNanos()
                 val decodeStartNs = SystemClock.elapsedRealtimeNanos()
                 val bitmap = BitmapFactory.decodeByteArray(postResult.imageBytes, 0, postResult.imageBytes.size)
@@ -2140,7 +2292,14 @@ class MainActivity : Activity() {
                     setPipelineStatus("Difix done in ${totalToDisplayedMs}ms (${capture.width}x${capture.height})")
                 }
             } catch (exc: Exception) {
-                runOnUiThread { setPipelineStatus("Difix failed: ${exc.message}") }
+                difixBusy = false
+                val photo = currentViewerPhoto
+                runOnUiThread {
+                    setPipelineStatus("Difix failed: ${exc.message}")
+                    if (photo != null) {
+                        showGenerateUnavailable(photo, generateBackendBase, "difix", exc.message ?: exc.javaClass.simpleName)
+                    }
+                }
             } finally {
                 difixBusy = false
             }
@@ -2233,15 +2392,40 @@ class MainActivity : Activity() {
         val difix = difixDataUrl ?: return
         if (fluxBusy) return
         fluxBusy = true
+        clearGenerateErrorOverlay()
+        val generateBackendBase = backendBaseUrl()
         runOnUiThread {
             updateViewerControls()
-            setPipelineStatus("Generating final image...")
+            setPipelineStatus("Checking Generate services...")
         }
         networkExecutor.execute {
             try {
+                val health = checkGenerateHealth(generateBackendBase)
+                if (!health.ok) {
+                    Log.w(
+                        TAG,
+                        "Generate health failed base=$generateBackendBase service=${health.service ?: "-"} " +
+                            "elapsedMs=${health.elapsedMs} error=${health.message}"
+                    )
+                    fluxBusy = false
+                    val photo = currentViewerPhoto
+                    runOnUiThread {
+                        updateViewerControls()
+                        if (photo != null) {
+                            showGenerateUnavailable(
+                                photo,
+                                generateBackendBase,
+                                "generate-health-${health.service?.lowercase() ?: "unknown"}",
+                                "${health.service ?: "Generate"} health: ${health.message}"
+                            )
+                        }
+                    }
+                    return@execute
+                }
                 val started = System.nanoTime()
                 val photo = currentViewerPhoto
                 val photoId = photo?.photoId ?: photoIdForAsset(capture.assetName)
+                runOnUiThread { setPipelineStatus("Generating final image...") }
                 val metrics = captureMetrics(capture)
                 val body = JSONObject()
                     .put("photoId", photoId)
@@ -2254,7 +2438,7 @@ class MainActivity : Activity() {
                     body.put("source", localSourceDataUrl(photo))
                     metrics.put("transportMode", "android-local-source-data-url+jpeg")
                 }
-                val response = postJson("${fluxUrl()}/fill", body, 300_000)
+                val response = postJson("$generateBackendBase/flux/fill", body, 300_000)
                 val image = response.getString("image")
                 val bitmap = decodeDataUrl(image)
                 fluxDataUrl = image
@@ -2270,9 +2454,13 @@ class MainActivity : Activity() {
                 }
             } catch (exc: Exception) {
                 fluxBusy = false
+                val photo = currentViewerPhoto
                 runOnUiThread {
                     updateViewerControls()
                     setPipelineStatus("FLUX failed: ${exc.message}")
+                    if (photo != null) {
+                        showGenerateUnavailable(photo, generateBackendBase, "flux", exc.message ?: exc.javaClass.simpleName)
+                    }
                 }
             }
         }
@@ -3673,6 +3861,10 @@ class MainActivity : Activity() {
 
     private fun updateViewerControls() {
         if (!::generateButton.isInitialized) return
+        if (generateErrorOverlay != null) {
+            generateButton.visibility = View.GONE
+            return
+        }
         if (displayMode == DisplayMode.DIFIX && difixDataUrl == null) displayMode = DisplayMode.RAW
         if (displayMode == DisplayMode.FLUX && fluxDataUrl == null) {
             displayMode = if (difixDataUrl != null) DisplayMode.DIFIX else DisplayMode.RAW
