@@ -27,6 +27,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.Parcelable
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.text.TextUtils
@@ -100,6 +101,8 @@ class MainActivity : Activity() {
     private val importedPhotos = mutableListOf<AlbumPhoto>()
     private val removedCuratedPhotoIds = mutableSetOf<String>()
     private val localSourceDataUrlCache = mutableMapOf<String, String>()
+    private var albumScrollState: AlbumScrollState? = null
+    private var albumScrollParcelable: Parcelable? = null
     private var nextImportedOrdinal = 1
     private var albumEditMode = false
     private val interBase: Typeface by lazy { resources.getFont(R.font.inter_variable) }
@@ -281,9 +284,64 @@ class MainActivity : Activity() {
         adapter.setPhotos(albumPhotos)
         applyFullscreen(root)
         setContentView(root)
+        restoreAlbumScrollPosition(grid, "showAlbum")
         if (albumPhotos.isEmpty()) {
             loadDeviceAlbum()
         }
+    }
+
+    private fun saveAlbumScrollPosition(reason: String) {
+        val grid = albumGrid ?: return
+        val anchorChild = (0 until grid.childCount)
+            .firstOrNull { ((grid.getChildAt(it)?.top) ?: Int.MIN_VALUE) >= grid.paddingTop }
+            ?: 0
+        val first = (grid.firstVisiblePosition + anchorChild).coerceAtLeast(0)
+        val top = grid.getChildAt(anchorChild)?.top ?: grid.paddingTop
+        albumScrollState = AlbumScrollState(first, top)
+        albumScrollParcelable = grid.onSaveInstanceState()
+        Log.i(TAG, "Album scroll saved reason=$reason anchorChild=$anchorChild first=$first offset=$top")
+    }
+
+    private fun restoreAlbumScrollPosition(grid: GridView, reason: String) {
+        val state = albumScrollState ?: return
+        val listState = albumScrollParcelable
+        fun applyRestore(pass: String) {
+            val count = grid.adapter?.count ?: 0
+            if (count <= 0) return
+            if (listState != null) {
+                grid.onRestoreInstanceState(listState)
+            } else {
+                val position = state.firstVisiblePosition.coerceIn(0, count - 1)
+                grid.smoothScrollToPositionFromTop(position, state.topOffsetPx, 0)
+                grid.setSelectionFromTop(position, state.topOffsetPx)
+            }
+            refreshVisibleOrbitPreviews()
+            Log.i(
+                TAG,
+                "Album scroll restored reason=$reason pass=$pass first=${state.firstVisiblePosition} " +
+                    "offset=${state.topOffsetPx} listState=${listState != null}"
+            )
+        }
+
+        grid.post { applyRestore("post") }
+        grid.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                grid.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                grid.post { applyRestore("layout") }
+            }
+        })
+        grid.postDelayed({
+            applyRestore("delayed")
+        }, 120L)
+        grid.postDelayed({
+            applyRestore("settled")
+        }, 320L)
+    }
+
+    private fun sourceAspect(photo: AlbumPhoto): Float? {
+        val width = photo.sourceWidth?.takeIf { it > 0 } ?: return null
+        val height = photo.sourceHeight?.takeIf { it > 0 } ?: return null
+        return width.toFloat() / height.toFloat()
     }
 
     private fun launchPhotoPicker() {
@@ -386,6 +444,7 @@ class MainActivity : Activity() {
                     albumPhotos = importedPhotos + parsed.filterNot { it.localUri?.toString() in importedUris }
                     albumAdapter?.setPhotos(albumPhotos)
                     albumStatus?.text = momentCountText()
+                    albumGrid?.let { restoreAlbumScrollPosition(it, "loadDeviceAlbum") }
                     Log.i(TAG, "Device photos loaded count=${parsed.size} imported=${importedPhotos.size}")
                 }
             } catch (exc: Exception) {
@@ -1485,6 +1544,7 @@ class MainActivity : Activity() {
     }
 
     private fun beginReframing(photo: AlbumPhoto) {
+        saveAlbumScrollPosition("beginReframing")
         if (!photo.imported && photo.hasSplat) {
             showViewer(photo)
             return
@@ -1508,6 +1568,7 @@ class MainActivity : Activity() {
     }
 
     private fun showReframingLoading(photo: AlbumPhoto): TextView {
+        saveAlbumScrollPosition("showReframingLoading")
         viewerVisible = true
         previewEnabled = false
         glView?.shutdown()
@@ -1572,6 +1633,7 @@ class MainActivity : Activity() {
             if (photo.localUri != null) beginReframing(photo) else showStaticPhoto(photo)
             return
         }
+        saveAlbumScrollPosition("showViewer")
         viewerVisible = true
         previewEnabled = false
         previewRequestSerial++
@@ -1638,8 +1700,19 @@ class MainActivity : Activity() {
         val root = FrameLayout(this).apply {
             setBackgroundColor(COLOR_CANVAS)
         }
-        root.addView(viewer, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-        root.addView(overlay, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        val viewerFrame = AspectFrameLayout(this, sourceAspect(photo)).apply {
+            setBackgroundColor(COLOR_CANVAS)
+        }
+        viewerFrame.addView(viewer, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        viewerFrame.addView(overlay, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        root.addView(
+            viewerFrame,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
+        )
         root.addView(
             studioBackButton(),
             FrameLayout.LayoutParams(
@@ -1680,6 +1753,7 @@ class MainActivity : Activity() {
     }
 
     private fun showStaticPhoto(photo: AlbumPhoto) {
+        saveAlbumScrollPosition("showStaticPhoto")
         viewerVisible = true
         previewEnabled = false
         glView?.shutdown()
@@ -2880,6 +2954,36 @@ class MainActivity : Activity() {
         val imported: Boolean = false
     ) {
         val splatAsset: String get() = "$photoId.splat"
+    }
+
+    private data class AlbumScrollState(
+        val firstVisiblePosition: Int,
+        val topOffsetPx: Int
+    )
+
+    private class AspectFrameLayout(
+        context: Context,
+        private val aspect: Float?
+    ) : FrameLayout(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val targetAspect = aspect?.takeIf { it.isFinite() && it > 0f }
+            if (targetAspect == null) {
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+                return
+            }
+            val parentW = MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(1)
+            val parentH = MeasureSpec.getSize(heightMeasureSpec).coerceAtLeast(1)
+            var measuredW = parentW
+            var measuredH = (measuredW / targetAspect).roundToInt().coerceAtLeast(1)
+            if (measuredH > parentH) {
+                measuredH = parentH
+                measuredW = (measuredH * targetAspect).roundToInt().coerceAtLeast(1)
+            }
+            super.onMeasure(
+                MeasureSpec.makeMeasureSpec(measuredW, MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(measuredH, MeasureSpec.EXACTLY)
+            )
+        }
     }
 
     private open class SquareFrameLayout(context: Context) : FrameLayout(context) {
