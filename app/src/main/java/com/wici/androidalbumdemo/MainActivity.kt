@@ -4,7 +4,6 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.Manifest
 import android.app.Activity
-import android.app.Dialog
 import android.content.res.ColorStateList
 import android.content.ContentValues
 import android.content.Context
@@ -42,8 +41,6 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
-import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
@@ -1833,7 +1830,7 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             background = roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(24).toFloat())
-            applySoftShadow(this, 4)
+            applySoftShadow(this, 0)
             setOnClickListener { beginReframing(photo) }
         }
         val detailLine = TextView(this).apply {
@@ -1949,7 +1946,7 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             background = roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(24).toFloat())
-            applySoftShadow(this, 4)
+            applySoftShadow(this, 0)
             setOnClickListener {
                 clearGenerateErrorOverlay()
                 if (difixDataUrl != null && latestCapture != null) {
@@ -3167,11 +3164,11 @@ class MainActivity : Activity() {
         segment.setTextColor(if (selected) COLOR_INK else COLOR_INK_SOFT)
         segment.typeface = inter(if (selected) 650 else 500)
         segment.background = if (selected) {
-            rounded(COLOR_SURFACE, dp(10).toFloat())
+            rounded(COLOR_SURFACE, dp(10).toFloat(), dpFloat(0.8f), COLOR_HAIRLINE)
         } else {
             null
         }
-        applySoftShadow(segment, if (selected) 2 else 0)
+        applySoftShadow(segment, 0)
     }
 
     private fun sheetCancelAction(label: String): TextView =
@@ -3202,7 +3199,7 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             background = roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(20).toFloat())
-            applySoftShadow(this, 3)
+            applySoftShadow(this, 0)
         }
 
     private data class ServerStatusModel(
@@ -3396,14 +3393,25 @@ class MainActivity : Activity() {
             }
         }
 
-        val dialog = Dialog(this)
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        var settingsPopup: android.widget.PopupWindow? = null
+        lateinit var sheetScroll: ScrollView
+        fun dismissSettingsSheet() {
+            val popup = settingsPopup ?: return
+            if (!popup.isShowing) return
+            sheetScroll.animate().cancel()
+            sheetScroll.animate()
+                .translationY(sheetScroll.height.toFloat())
+                .setDuration(150L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .withEndAction { popup.dismiss() }
+                .start()
+        }
 
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(12), dp(24), dp(20))
             background = roundedTop(COLOR_SURFACE, dp(22).toFloat())
-            applySoftShadow(this, 6)
+            applySoftShadow(this, 0)
             addView(
                 View(this@MainActivity).apply {
                     background = rounded(Color.argb(51, 107, 110, 118), dp(2).toFloat())
@@ -3546,7 +3554,7 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL or Gravity.END
                     addView(
                         sheetCancelAction("Cancel").apply {
-                            setOnClickListener { dialog.dismiss() }
+                            setOnClickListener { dismissSettingsSheet() }
                         },
                         LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40))
                     )
@@ -3565,7 +3573,7 @@ class MainActivity : Activity() {
                                     clearBackendBaseUrlOverride()
                                     Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
                                 }
-                                dialog.dismiss()
+                                dismissSettingsSheet()
                             }
                         },
                         LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)).apply {
@@ -3579,25 +3587,45 @@ class MainActivity : Activity() {
             )
         }
 
-        val scroll = ScrollView(this).apply {
+        sheetScroll = ScrollView(this).apply {
             isFillViewport = false
             overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            isClickable = true
+            visibility = View.INVISIBLE
             addView(sheet, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
 
-        dialog.setContentView(scroll)
-        dialog.setOnShowListener {
-            dialog.window?.let { window ->
-                window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                window.setDimAmount(0.36f)
-                window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-                window.setGravity(Gravity.BOTTOM)
-                window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            }
+        val popupRoot = FrameLayout(this).apply {
+            setBackgroundColor(0x5C000000)
+            isClickable = true
+            setOnClickListener { dismissSettingsSheet() }
+            addView(
+                sheetScroll,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+            )
         }
         updateModeUi()
         updateAccountUi()
-        dialog.show()
+        settingsPopup = android.widget.PopupWindow(
+            popupRoot,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            true
+        ).apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            isOutsideTouchable = true
+            setOnDismissListener { sheetScroll.animate().cancel() }
+        }
+        settingsPopup.showAtLocation(window.decorView, Gravity.NO_GRAVITY, 0, 0)
+        sheetScroll.post {
+            sheetScroll.translationY = sheetScroll.height.toFloat()
+            sheetScroll.visibility = View.VISIBLE
+            sheetScroll.animate()
+                .translationY(0f)
+                .setDuration(220L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .start()
+        }
     }
 
     private fun manualBackendBaseUrl(): String? {
