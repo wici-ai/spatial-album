@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spatial Album</title>
+    <meta
+      name="description"
+      content="Spatial Album turns a single photo into a 3D scene you can orbit, pan, and reframe on Android."
+    />
+    <meta name="theme-color" content="#F4F4F2" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&family=Space+Grotesk:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --canvas: #f4f4f2;
+        --ink: #16161a;
+        --ink-soft: #6e6e78;
+        --accent: #5b5bf6;
+        --hairline: #e4e4e6;
+        --stage: #131318;
+        --stage-glow: rgba(91, 91, 246, 0.22);
+        --white: #ffffff;
+        --radius: 8px;
+        --max: 1160px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background: var(--canvas);
+        color: var(--ink);
+        font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.5;
+        letter-spacing: 0;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      button,
+      a {
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .site-shell {
+        min-height: 100vh;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        border-bottom: 1px solid rgba(228, 228, 230, 0.82);
+        background: rgba(244, 244, 242, 0.88);
+        backdrop-filter: blur(18px);
+      }
+
+      .nav {
+        width: min(var(--max), calc(100% - 32px));
+        height: 72px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .wordmark {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-family: "Space Grotesk", Inter, sans-serif;
+        font-size: 19px;
+        font-weight: 700;
+      }
+
+      .wordmark-mark {
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        background:
+          radial-gradient(circle at 68% 30%, rgba(255, 255, 255, 0.85), transparent 18px),
+          linear-gradient(135deg, var(--accent), #9090ff);
+        box-shadow: 0 10px 24px rgba(91, 91, 246, 0.22);
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        color: var(--ink-soft);
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .nav-links a {
+        padding: 8px 0;
+      }
+
+      .nav-links a:hover {
+        color: var(--ink);
+      }
+
+      .hero {
+        width: min(var(--max), calc(100% - 32px));
+        margin: 0 auto;
+        padding: 88px 0 72px;
+      }
+
+      .hero-copy {
+        max-width: 760px;
+      }
+
+      .eyebrow,
+      .kicker {
+        margin: 0 0 14px;
+        color: var(--accent);
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        font-family: "Space Grotesk", Inter, sans-serif;
+        line-height: 0.98;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        max-width: 850px;
+        font-size: clamp(58px, 10vw, 124px);
+        font-weight: 700;
+      }
+
+      h2 {
+        font-size: clamp(34px, 5.5vw, 68px);
+        font-weight: 700;
+      }
+
+      h3 {
+        font-size: 24px;
+        font-weight: 700;
+      }
+
+      .lede {
+        max-width: 690px;
+        margin: 28px 0 0;
+        color: var(--ink-soft);
+        font-size: clamp(18px, 2vw, 23px);
+      }
+
+      .hero-actions,
+      .section-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 14px;
+        margin-top: 34px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 48px;
+        border: 1px solid transparent;
+        border-radius: var(--radius);
+        padding: 0 18px;
+        font-weight: 700;
+        white-space: nowrap;
+        transition:
+          transform 160ms ease,
+          border-color 160ms ease,
+          background 160ms ease;
+      }
+
+      .button:hover {
+        transform: translateY(-1px);
+      }
+
+      .button.primary {
+        background: var(--ink);
+        color: var(--white);
+      }
+
+      .button.secondary {
+        border-color: var(--hairline);
+        background: rgba(255, 255, 255, 0.52);
+      }
+
+      .text-link {
+        color: var(--ink);
+        font-weight: 700;
+      }
+
+      .text-link::after {
+        content: " ↓";
+        color: var(--accent);
+      }
+
+      .stage-wrap {
+        position: relative;
+        margin-top: 56px;
+      }
+
+      .stage-wrap::before {
+        position: absolute;
+        inset: -28px 8% auto;
+        height: 180px;
+        content: "";
+        background: radial-gradient(ellipse, var(--stage-glow), transparent 67%);
+        filter: blur(16px);
+        pointer-events: none;
+      }
+
+      .spatial-stage {
+        position: relative;
+        overflow: hidden;
+        min-height: 560px;
+        border-radius: var(--radius);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0)),
+          var(--stage);
+        box-shadow:
+          0 40px 100px rgba(16, 16, 22, 0.26),
+          inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+        transform-style: preserve-3d;
+        perspective: 1200px;
+      }
+
+      .stage-grid {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.055) 1px, transparent 1px);
+        background-size: 52px 52px;
+        mask-image: radial-gradient(circle at 58% 45%, black, transparent 72%);
+        opacity: 0.8;
+      }
+
+      .stage-copy {
+        position: absolute;
+        left: clamp(22px, 4vw, 54px);
+        top: clamp(22px, 4vw, 50px);
+        z-index: 5;
+        max-width: 330px;
+        color: rgba(255, 255, 255, 0.9);
+      }
+
+      .stage-copy .kicker {
+        margin-bottom: 10px;
+        color: #b8b8ff;
+      }
+
+      .stage-copy strong {
+        display: block;
+        font-family: "Space Grotesk", Inter, sans-serif;
+        font-size: clamp(28px, 4vw, 48px);
+        line-height: 1;
+      }
+
+      .stage-copy span {
+        display: block;
+        margin-top: 12px;
+        color: rgba(255, 255, 255, 0.62);
+        font-size: 14px;
+      }
+
+      .depth-scene {
+        --rx: 0deg;
+        --ry: 0deg;
+        --mx: 0px;
+        --my: 0px;
+        position: absolute;
+        right: clamp(22px, 6vw, 88px);
+        bottom: clamp(24px, 5vw, 66px);
+        width: min(690px, 72%);
+        aspect-ratio: 1.38;
+        transform: rotateX(var(--rx)) rotateY(var(--ry));
+        transform-style: preserve-3d;
+        transition: transform 260ms ease;
+      }
+
+      .depth-layer {
+        position: absolute;
+        inset: 0;
+        border-radius: 8px;
+        background-image: var(--photo);
+        background-size: cover;
+        background-position: center;
+        transform-style: preserve-3d;
+        transition: transform 260ms ease;
+      }
+
+      .depth-layer.back {
+        filter: saturate(0.78) brightness(0.62) blur(2px);
+        transform: translate3d(calc(var(--mx) * -0.18), calc(var(--my) * -0.18), -90px) scale(1.1);
+        opacity: 0.74;
+      }
+
+      .depth-layer.mid {
+        clip-path: inset(10% 9% 20% 30% round 20px);
+        filter: saturate(1.04) contrast(1.04);
+        transform: translate3d(calc(var(--mx) * 0.34), calc(var(--my) * 0.34), 58px) scale(1.01);
+        box-shadow: 0 26px 64px rgba(0, 0, 0, 0.28);
+      }
+
+      .depth-layer.front {
+        clip-path: inset(34% 48% 14% 10% round 18px);
+        filter: saturate(1.1) contrast(1.08);
+        transform: translate3d(calc(var(--mx) * 0.78), calc(var(--my) * 0.78), 128px) scale(1.025);
+        box-shadow: 0 22px 80px rgba(0, 0, 0, 0.38);
+      }
+
+      .phone-frame {
+        position: absolute;
+        inset: 6% 12% 8% 18%;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 8px;
+        transform: translate3d(calc(var(--mx) * 0.08), calc(var(--my) * 0.08), 8px);
+        pointer-events: none;
+      }
+
+      .axis-readout {
+        position: absolute;
+        right: clamp(16px, 3vw, 34px);
+        bottom: clamp(16px, 3vw, 30px);
+        z-index: 6;
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: 6px 16px;
+        color: rgba(255, 255, 255, 0.64);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 12px;
+      }
+
+      section {
+        border-top: 1px solid var(--hairline);
+      }
+
+      .section-inner {
+        width: min(var(--max), calc(100% - 32px));
+        margin: 0 auto;
+        padding: 86px 0;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
+        gap: clamp(32px, 6vw, 84px);
+        align-items: start;
+      }
+
+      .section-copy p {
+        max-width: 560px;
+        margin: 22px 0 0;
+        color: var(--ink-soft);
+        font-size: 18px;
+      }
+
+      .terminal {
+        border: 1px solid #d8d8dc;
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: #101014;
+        box-shadow: 0 24px 70px rgba(22, 22, 26, 0.12);
+      }
+
+      .terminal-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 48px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 0 12px 0 16px;
+        color: rgba(255, 255, 255, 0.58);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 12px;
+      }
+
+      .dots {
+        display: flex;
+        gap: 7px;
+      }
+
+      .dots i {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.24);
+      }
+
+      .copy-button {
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.08);
+        color: rgba(255, 255, 255, 0.86);
+        cursor: pointer;
+        font-family: Inter, sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+        min-height: 32px;
+        padding: 0 12px;
+      }
+
+      pre {
+        margin: 0;
+        padding: 24px;
+        overflow-x: auto;
+        color: #f1f1ff;
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+        font-size: clamp(13px, 1.45vw, 15px);
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .terminal-note {
+        margin: 16px 0 0;
+        color: var(--ink-soft);
+        font-size: 14px;
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1px;
+        margin-top: 44px;
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--hairline);
+      }
+
+      .step {
+        min-height: 240px;
+        padding: 26px;
+        background: rgba(255, 255, 255, 0.36);
+      }
+
+      .step-marker {
+        display: inline-flex;
+        width: 34px;
+        height: 34px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--hairline);
+        border-radius: 50%;
+        color: var(--accent);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-weight: 700;
+      }
+
+      .step h3 {
+        margin-top: 24px;
+        font-size: 22px;
+      }
+
+      .step p,
+      .run-card p {
+        margin: 12px 0 0;
+        color: var(--ink-soft);
+      }
+
+      .run-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1px;
+        margin-top: 42px;
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--hairline);
+      }
+
+      .run-card {
+        min-height: 250px;
+        padding: 34px;
+        background: rgba(255, 255, 255, 0.38);
+      }
+
+      .run-card .mode {
+        color: var(--accent);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      footer {
+        border-top: 1px solid var(--hairline);
+      }
+
+      .footer-inner {
+        width: min(var(--max), calc(100% - 32px));
+        margin: 0 auto;
+        padding: 34px 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        color: var(--ink-soft);
+        font-size: 14px;
+      }
+
+      .footer-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+
+      .footer-links a:hover {
+        color: var(--ink);
+      }
+
+      @media (max-width: 900px) {
+        .hero {
+          padding-top: 58px;
+        }
+
+        .spatial-stage {
+          min-height: 620px;
+        }
+
+        .depth-scene {
+          right: 18px;
+          bottom: 32px;
+          width: calc(100% - 36px);
+        }
+
+        .stage-copy {
+          max-width: calc(100% - 44px);
+        }
+
+        .split,
+        .steps,
+        .run-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .step,
+        .run-card {
+          min-height: auto;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .nav {
+          width: min(100% - 24px, var(--max));
+          height: 62px;
+        }
+
+        .nav-links {
+          gap: 12px;
+          font-size: 13px;
+        }
+
+        .wordmark {
+          font-size: 17px;
+        }
+
+        .wordmark-mark {
+          width: 24px;
+          height: 24px;
+        }
+
+        .hero,
+        .section-inner,
+        .footer-inner {
+          width: calc(100% - 24px);
+        }
+
+        h1 {
+          font-size: clamp(48px, 16vw, 72px);
+        }
+
+        .spatial-stage {
+          min-height: 580px;
+        }
+
+        .axis-readout {
+          display: none;
+        }
+
+        .button {
+          width: 100%;
+        }
+
+        .hero-actions,
+        .section-actions {
+          align-items: stretch;
+        }
+
+        pre {
+          padding: 18px;
+        }
+
+        .footer-inner {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          scroll-behavior: auto !important;
+          transition-duration: 0.001ms !important;
+        }
+
+        .depth-scene,
+        .depth-layer {
+          transform: none !important;
+        }
+
+        .depth-layer.back {
+          transform: scale(1.06) !important;
+        }
+
+        .depth-layer.mid,
+        .depth-layer.front {
+          box-shadow: 0 18px 50px rgba(0, 0, 0, 0.24);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="topbar">
+        <nav class="nav" aria-label="Primary navigation">
+          <a class="wordmark" href="#top" aria-label="Spatial Album home">
+            <span class="wordmark-mark" aria-hidden="true"></span>
+            <span>Spatial Album</span>
+          </a>
+          <div class="nav-links">
+            <a href="https://github.com/wici-ai/spatial-album/releases/latest">Download</a>
+            <a href="https://github.com/wici-ai/spatial-album">GitHub</a>
+          </div>
+        </nav>
+      </header>
+
+      <main id="top">
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="hero-copy">
+            <p class="eyebrow">Native Android spatial reframing</p>
+            <h1 id="hero-title">One photo. Step inside it.</h1>
+            <p class="lede">
+              Spatial Album turns a single photo into a 3D scene you can orbit, pan, and reframe -
+              right on your phone.
+            </p>
+            <div class="hero-actions">
+              <a class="button primary" href="https://github.com/wici-ai/spatial-album/releases/latest">
+                Download the app
+              </a>
+              <a class="text-link" href="#demo">See it move</a>
+            </div>
+          </div>
+
+          <div class="stage-wrap" id="demo">
+            <div
+              class="spatial-stage"
+              aria-label="Spatial viewer demo panel"
+              style="--photo: url('assets/hero-photo.jpg')"
+            >
+              <div class="stage-grid" aria-hidden="true"></div>
+              <div class="stage-copy">
+                <span class="kicker">Spatial viewer</span>
+                <strong>Flat image, real depth.</strong>
+                <span>Move your pointer across the frame to tilt through the scene.</span>
+              </div>
+              <div class="depth-scene" data-depth-scene>
+                <div class="depth-layer back" aria-hidden="true"></div>
+                <div class="depth-layer mid" aria-hidden="true"></div>
+                <div class="depth-layer front" aria-hidden="true"></div>
+                <div class="phone-frame" aria-hidden="true"></div>
+              </div>
+              <div class="axis-readout" aria-hidden="true">
+                <span>orbit</span><span data-readout-x>0.0 deg</span>
+                <span>parallax</span><span data-readout-y>0.0 px</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="install" aria-labelledby="install-title">
+          <div class="section-inner split">
+            <div class="section-copy">
+              <p class="kicker">Run it on your own GPU</p>
+              <h2 id="install-title">Local backend, one command.</h2>
+              <p>
+                Have a capable GPU? Host the backend locally in one command. The app finds it on your
+                network automatically.
+              </p>
+              <div class="section-actions">
+                <a class="button secondary" href="https://github.com/wici-ai/spatial-album/releases/download/v0.1/SpatialAlbum-v0.1.apk">
+                  Download APK
+                </a>
+                <a class="text-link" href="https://github.com/wici-ai/spatial-album/releases/latest">Latest release</a>
+              </div>
+            </div>
+
+            <div>
+              <div class="terminal" aria-label="One-click local backend install command">
+                <div class="terminal-bar">
+                  <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+                  <button class="copy-button" type="button" data-copy-command>Copy</button>
+                </div>
+                <pre><code id="install-command">git clone --recurse-submodules https://github.com/wici-ai/spatial-album-backend.git &amp;&amp; cd spatial-album-backend/deploy &amp;&amp; ./install.sh</code></pre>
+              </div>
+              <p class="terminal-note">
+                Checks the GPU, pulls model weights, starts the backend, and advertises it on your LAN.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section aria-labelledby="how-title">
+          <div class="section-inner">
+            <div class="section-copy">
+              <p class="kicker">How it works</p>
+              <h2 id="how-title">A real 3D scene from one frame.</h2>
+            </div>
+            <div class="steps">
+              <article class="step">
+                <span class="step-marker">1</span>
+                <h3>Photo</h3>
+                <p>Pick a flat image from your album and keep the original frame intact.</p>
+              </article>
+              <article class="step">
+                <span class="step-marker">2</span>
+                <h3>Depth</h3>
+                <p>SHARP estimates geometry and camera intrinsics from that single view.</p>
+              </article>
+              <article class="step">
+                <span class="step-marker">3</span>
+                <h3>3D splat</h3>
+                <p>The backend converts the image into a Gaussian splat that renders in real time.</p>
+              </article>
+              <article class="step">
+                <span class="step-marker">4</span>
+                <h3>Reframe</h3>
+                <p>Orbit, pan, refine, and generate a new composition from the scene.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section aria-labelledby="run-title">
+          <div class="section-inner">
+            <div class="section-copy">
+              <p class="kicker">Two ways to run</p>
+              <h2 id="run-title">Use the cloud, or keep it local.</h2>
+            </div>
+            <div class="run-grid">
+              <article class="run-card">
+                <span class="mode">Cloud</span>
+                <h3>Sign in with Google, nothing to set up.</h3>
+                <p>Use the hosted backend when you want the shortest path from install to orbit.</p>
+              </article>
+              <article class="run-card">
+                <span class="mode">Your GPU</span>
+                <h3>Fully local, private, fast.</h3>
+                <p>Run the backend on your own NVIDIA GPU and keep photos on your network.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <div class="footer-inner">
+          <span>WiCi / Spatial Album</span>
+          <div class="footer-links">
+            <a href="https://github.com/wici-ai/spatial-album">GitHub repo</a>
+            <a href="https://github.com/wici-ai/spatial-album/releases/latest">Latest release</a>
+            <a href="https://github.com/wici-ai/spatial-album/blob/main/LICENSE">License</a>
+          </div>
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      (() => {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const stage = document.querySelector(".spatial-stage");
+        const scene = document.querySelector("[data-depth-scene]");
+        const readoutX = document.querySelector("[data-readout-x]");
+        const readoutY = document.querySelector("[data-readout-y]");
+
+        const setDepth = (x, y) => {
+          if (!scene || reduceMotion) return;
+          const rx = (-y * 5.5).toFixed(2);
+          const ry = (x * 7.5).toFixed(2);
+          const mx = (x * 30).toFixed(2);
+          const my = (y * 24).toFixed(2);
+          scene.style.setProperty("--rx", `${rx}deg`);
+          scene.style.setProperty("--ry", `${ry}deg`);
+          scene.style.setProperty("--mx", `${mx}px`);
+          scene.style.setProperty("--my", `${my}px`);
+          if (readoutX) readoutX.textContent = `${ry} deg`;
+          if (readoutY) readoutY.textContent = `${mx} px`;
+        };
+
+        if (stage && !reduceMotion) {
+          stage.addEventListener("pointermove", (event) => {
+            const rect = stage.getBoundingClientRect();
+            const x = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
+            const y = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
+            setDepth(Math.max(-1, Math.min(1, x)), Math.max(-1, Math.min(1, y)));
+          });
+          stage.addEventListener("pointerleave", () => setDepth(0, 0));
+          window.addEventListener(
+            "deviceorientation",
+            (event) => {
+              if (event.beta == null || event.gamma == null) return;
+              setDepth(Math.max(-1, Math.min(1, event.gamma / 24)), Math.max(-1, Math.min(1, (event.beta - 45) / 36)));
+            },
+            { passive: true }
+          );
+        }
+
+        const commandEl = document.getElementById("install-command");
+        const copyButton = document.querySelector("[data-copy-command]");
+        if (commandEl && copyButton) {
+          const command = commandEl.textContent.trim();
+          copyButton.addEventListener("click", async () => {
+            try {
+              if (!navigator.clipboard?.writeText) {
+                throw new Error("Clipboard API unavailable");
+              }
+              await navigator.clipboard.writeText(command);
+              copyButton.textContent = "Copied";
+              copyButton.setAttribute("aria-label", "Install command copied");
+            } catch {
+              const range = document.createRange();
+              range.selectNodeContents(commandEl);
+              const selection = window.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(range);
+              const copied = document.execCommand("copy");
+              copyButton.textContent = copied ? "Copied" : "Selected";
+              if (copied) {
+                copyButton.setAttribute("aria-label", "Install command copied");
+                selection.removeAllRanges();
+              }
+            }
+            window.setTimeout(() => {
+              copyButton.textContent = "Copy";
+              copyButton.removeAttribute("aria-label");
+            }, 1800);
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
