@@ -36,7 +36,7 @@ object SupabaseAuth {
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xd2F0bGV1a3ZjbGVib215bWRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4NzIyNDUsImV4cCI6MjA5ODQ0ODI0NX0.lVY55-oxfV-zO9XA6IszZjy0kd8Dw9LgDt7YKNoXuSM"
     // The Web OAuth client ID (serverClientId) — the audience Supabase validates against.
     const val GOOGLE_WEB_CLIENT_ID =
-        "1097403621666-5eere3g8irq835mo9m2srjt32gkupc04.apps.googleusercontent.com"
+        "525978252888-bbf3d6iejgme0bio0th1r86suutnn71b.apps.googleusercontent.com"
 
     private const val PREFS_NAME = "android-album-demo"
     private const val K_ACCESS = "sb_access_token"
