@@ -52,6 +52,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -241,7 +242,7 @@ class MainActivity : Activity() {
             }
         )
         val settingsButton = GearButton(this).apply {
-            contentDescription = "Backend settings"
+            contentDescription = "Settings"
             isClickable = true
             isFocusable = true
             background = rounded(COLOR_SURFACE, dp(22).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
@@ -258,7 +259,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(10), 0, 0)
         }
         albumStatus = TextView(this).apply {
-            text = if (albumPhotos.isEmpty()) "LOADING PHOTOS" else momentCountText()
+            text = if (albumPhotos.isEmpty()) "LOADING GALLERY" else momentCountText()
             setTextColor(COLOR_INK_SOFT)
             textSize = 11f
             typeface = inter(600)
@@ -430,7 +431,7 @@ class MainActivity : Activity() {
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             loadDeviceAlbum()
         } else {
-            albumStatus?.text = "PHOTO ACCESS NEEDED"
+            albumStatus?.text = "GALLERY UNAVAILABLE"
             albumAdapter?.setPhotos(importedPhotos)
             albumPhotos = importedPhotos
         }
@@ -467,15 +468,11 @@ class MainActivity : Activity() {
     private fun loadDeviceAlbum() {
         val requestSerial = ++galleryRequestSerial
         if (!hasPhotoLibraryPermission()) {
-            albumStatus?.text = if (shouldShowRequestPermissionRationale(photoLibraryPermission())) {
-                "ALLOW PHOTO ACCESS TO BUILD YOUR ALBUM"
-            } else {
-                "PHOTO ACCESS NEEDED"
-            }
+            albumStatus?.text = "GALLERY UNAVAILABLE"
             requestPermissions(arrayOf(photoLibraryPermission()), REQUEST_READ_PHOTOS)
             return
         }
-        albumStatus?.text = "LOADING PHOTOS"
+        albumStatus?.text = "LOADING GALLERY"
         networkExecutor.execute {
             try {
                 val parsed = queryDevicePhotos()
@@ -493,7 +490,7 @@ class MainActivity : Activity() {
                 Log.w(TAG, "Device photo load failed", exc)
                 runOnUiThread {
                     if (requestSerial != galleryRequestSerial || viewerVisible) return@runOnUiThread
-                    albumStatus?.text = "PHOTOS UNAVAILABLE"
+                    albumStatus?.text = "GALLERY UNAVAILABLE"
                 }
             }
         }
@@ -2746,57 +2743,35 @@ class MainActivity : Activity() {
         applySoftShadow(view, if (enabled) 3 else 2)
     }
 
-    private fun serverOptionRow(mark: TextView, title: String, detail: String, badge: String?): LinearLayout =
+    private fun serverRadioRow(mark: TextView, title: String, detail: String): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(15), dp(13), dp(15), dp(13))
+            gravity = Gravity.TOP
+            setPadding(0, dp(10), 0, dp(10))
             isClickable = true
             isFocusable = true
+            background = roundedState(Color.TRANSPARENT, 0x08000000, dp(8).toFloat())
             addView(
                 mark.apply {
-                    textSize = 12f
-                    typeface = inter(800)
+                    textSize = 16f
+                    typeface = inter(650)
                     includeFontPadding = false
                     gravity = Gravity.CENTER
                 },
                 LinearLayout.LayoutParams(dp(24), dp(24)).apply {
-                    rightMargin = dp(13)
+                    rightMargin = dp(10)
                 }
             )
             addView(
                 LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                     addView(
-                        LinearLayout(this@MainActivity).apply {
-                            orientation = LinearLayout.HORIZONTAL
-                            gravity = Gravity.CENTER_VERTICAL
-                            addView(
-                                TextView(this@MainActivity).apply {
-                                    text = title
-                                    setTextColor(COLOR_INK)
-                                    textSize = 14f
-                                    typeface = inter(700)
-                                    includeFontPadding = false
-                                },
-                                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                            )
-                            if (badge != null) {
-                                addView(
-                                    TextView(this@MainActivity).apply {
-                                        text = badge
-                                        setTextColor(COLOR_ACCENT)
-                                        textSize = 10f
-                                        typeface = inter(700)
-                                        includeFontPadding = false
-                                        setPadding(dp(8), dp(3), dp(8), dp(3))
-                                        background = rounded(0xFFEFF0FF.toInt(), dp(10).toFloat())
-                                    },
-                                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                                        leftMargin = dp(8)
-                                    }
-                                )
-                            }
+                        TextView(this@MainActivity).apply {
+                            text = title
+                            setTextColor(COLOR_INK)
+                            textSize = 15f
+                            typeface = inter(650)
+                            includeFontPadding = false
                         },
                         LinearLayout.LayoutParams.MATCH_PARENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT
@@ -2807,7 +2782,7 @@ class MainActivity : Activity() {
                             setTextColor(COLOR_INK_SOFT)
                             textSize = 12f
                             typeface = inter(500)
-                            setPadding(0, dp(6), 0, 0)
+                            setPadding(0, dp(5), 0, 0)
                         },
                         LinearLayout.LayoutParams.MATCH_PARENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT
@@ -2817,19 +2792,9 @@ class MainActivity : Activity() {
             )
         }
 
-    private fun styleServerOptionRow(row: View, mark: TextView, selected: Boolean) {
-        row.background = if (selected) {
-            rounded(0xFFF2F2FF.toInt(), dp(15).toFloat(), dpFloat(1.2f), COLOR_ACCENT)
-        } else {
-            rounded(COLOR_SURFACE, dp(15).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
-        }
-        mark.text = if (selected) "✓" else ""
-        mark.setTextColor(if (selected) Color.WHITE else Color.TRANSPARENT)
-        mark.background = if (selected) {
-            rounded(COLOR_ACCENT, dp(12).toFloat())
-        } else {
-            rounded(COLOR_SURFACE, dp(12).toFloat(), dpFloat(1.2f), COLOR_HAIRLINE)
-        }
+    private fun styleServerRadio(mark: TextView, selected: Boolean) {
+        mark.text = if (selected) "●" else "○"
+        mark.setTextColor(if (selected) COLOR_ACCENT else COLOR_INK_SOFT)
     }
 
     private fun dialogActionText(label: String, color: Int): TextView =
@@ -2848,39 +2813,65 @@ class MainActivity : Activity() {
         }
 
     private data class ServerStatusModel(
-        val title: String,
-        val detail: String,
-        val url: String,
-        val dotColor: Int
+        val statusLine: String,
+        val addressLine: String
     )
 
-    private fun serverStatusModel(manualMode: Boolean, url: String): ServerStatusModel =
+    private fun serverStatusModel(manualMode: Boolean, manualText: String): ServerStatusModel =
         when {
             manualMode -> ServerStatusModel(
-                title = "Custom server",
-                detail = "Spatial Album will use the address you enter below.",
-                url = url,
-                dotColor = COLOR_ACCENT
+                statusLine = "Using a custom server",
+                addressLine = backendAddressLabel(
+                    normalizeBackendBaseUrl(manualText) ?: manualText.trim().takeIf { it.isNotBlank() }
+                ) ?: "Enter a server address"
             )
             discoveredBackendBaseUrl != null -> ServerStatusModel(
-                title = "Local server auto-discovered",
-                detail = "Using your WiCi box on this network.",
-                url = discoveredBackendBaseUrl ?: url,
-                dotColor = 0xFF34C759.toInt()
+                statusLine = "Connected to your WiCi box",
+                addressLine = backendAddressLabel(discoveredBackendBaseUrl)
+                    ?: backendAddressLabel(backendBaseUrl()).orEmpty()
             )
             backendDiscoveryInProgress -> ServerStatusModel(
-                title = "Looking for a local server",
-                detail = "Using cloud while discovery runs.",
-                url = DEFAULT_BACKEND_BASE_URL,
-                dotColor = 0xFFFFB020.toInt()
+                statusLine = "Looking for your WiCi box",
+                addressLine = backendAddressLabel(DEFAULT_BACKEND_BASE_URL).orEmpty()
             )
             else -> ServerStatusModel(
-                title = "Cloud server",
-                detail = "Using the hosted demo backend.",
-                url = DEFAULT_BACKEND_BASE_URL,
-                dotColor = COLOR_INK_SOFT
+                statusLine = "Using WiCi Cloud",
+                addressLine = backendAddressLabel(DEFAULT_BACKEND_BASE_URL).orEmpty()
             )
         }
+
+    private fun backendAddressLabel(url: String?): String? {
+        val value = url?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val normalized = normalizeBackendBaseUrl(value) ?: value
+        return try {
+            val uri = Uri.parse(normalized)
+            val host = uri.host.orEmpty()
+            val port = uri.port
+            if (host.isBlank() || port <= 0) normalized.removePrefix("http://").removePrefix("https://") else "$host:$port"
+        } catch (_: Exception) {
+            normalized.removePrefix("http://").removePrefix("https://")
+        }
+    }
+
+    private fun googleAccountEmail(): String? =
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(PREF_GOOGLE_ACCOUNT_EMAIL, null)
+            ?.takeIf { it.isNotBlank() }
+
+    private fun clearGoogleAccount() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .remove(PREF_GOOGLE_ACCOUNT_EMAIL)
+            .apply()
+    }
+
+    private fun beginGoogleSignIn() {
+        if (GOOGLE_OAUTH_CLIENT_ID.isBlank()) {
+            Toast.makeText(this, "Google sign-in coming soon", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Toast.makeText(this, "Google sign-in is not configured yet", Toast.LENGTH_SHORT).show()
+    }
 
     private fun showBackendSettingsDialog() {
         var manualMode = manualBackendBaseUrl() != null
@@ -2889,10 +2880,11 @@ class MainActivity : Activity() {
         lateinit var automaticMark: TextView
         lateinit var manualMark: TextView
         lateinit var manualFieldGroup: LinearLayout
-        lateinit var statusDot: TextView
-        lateinit var statusTitle: TextView
-        lateinit var statusDetail: TextView
-        lateinit var statusUrl: TextView
+        lateinit var statusLine: TextView
+        lateinit var statusAddress: TextView
+        lateinit var accountTitle: TextView
+        lateinit var accountDetail: TextView
+        lateinit var signOutAction: TextView
         val input = EditText(this).apply {
             setSingleLine(true)
             setText(manualBackendBaseUrl() ?: backendBaseUrl())
@@ -2902,130 +2894,112 @@ class MainActivity : Activity() {
             typeface = inter(500)
             setTextColor(COLOR_INK)
             setHintTextColor(COLOR_INK_SOFT)
-            hint = DEFAULT_BACKEND_BASE_URL
-            background = rounded(0xFFF8F9FB.toInt(), dp(12).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+            hint = "http://192.168.1.50:54228"
+            background = rounded(COLOR_SURFACE, dp(10).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
             setPadding(dp(14), 0, dp(14), 0)
         }
 
         fun updateModeUi() {
-            styleServerOptionRow(automaticRow, automaticMark, selected = !manualMode)
-            styleServerOptionRow(manualRow, manualMark, selected = manualMode)
+            styleServerRadio(automaticMark, selected = !manualMode)
+            styleServerRadio(manualMark, selected = manualMode)
             manualFieldGroup.visibility = if (manualMode) View.VISIBLE else View.GONE
             input.isEnabled = manualMode
-            val effective = if (manualMode) {
-                normalizeBackendBaseUrl(input.text?.toString().orEmpty()) ?: input.text?.toString().orEmpty().trim()
+            val status = serverStatusModel(manualMode, input.text?.toString().orEmpty())
+            statusLine.text = status.statusLine
+            statusAddress.text = status.addressLine
+        }
+
+        fun updateAccountUi() {
+            val email = googleAccountEmail()
+            if (email == null) {
+                accountTitle.text = "Sign in with Google"
+                accountDetail.text = "Needed for cloud"
+                signOutAction.visibility = View.GONE
             } else {
-                discoveredBackendBaseUrl ?: DEFAULT_BACKEND_BASE_URL
+                accountTitle.text = "Signed in as $email"
+                accountDetail.text = "Google account"
+                signOutAction.visibility = View.VISIBLE
             }
-            val status = serverStatusModel(manualMode, effective)
-            statusDot.setTextColor(status.dotColor)
-            statusTitle.text = status.title
-            statusDetail.text = status.detail
-            statusUrl.text = status.url
         }
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(22), dp(24), dp(18))
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = "Server settings"
-                    setTextColor(COLOR_INK)
-                    textSize = 21f
-                    typeface = inter(700)
-                    includeFontPadding = false
-                },
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            )
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = "Choose how Spatial Album connects for reframing and generation."
-                    setTextColor(COLOR_INK_SOFT)
-                    textSize = 13f
-                    typeface = inter(500)
-                    setPadding(0, dp(8), 0, dp(16))
-                },
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            )
+            setPadding(dp(24), dp(22), dp(24), dp(16))
             addView(
                 LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(16), dp(13), dp(16), dp(13))
-                    background = rounded(0xFFF8F9FB.toInt(), dp(16).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
-                    statusDot = TextView(this@MainActivity).apply {
-                        text = "●"
-                        textSize = 18f
-                        includeFontPadding = false
-                        gravity = Gravity.CENTER
-                    }
-                    addView(statusDot, LinearLayout.LayoutParams(dp(20), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        rightMargin = dp(10)
-                    })
                     addView(
-                        LinearLayout(this@MainActivity).apply {
-                            orientation = LinearLayout.VERTICAL
-                            statusTitle = TextView(this@MainActivity).apply {
-                                setTextColor(COLOR_INK)
-                                textSize = 14f
-                                typeface = inter(700)
-                                includeFontPadding = false
-                            }
-                            statusDetail = TextView(this@MainActivity).apply {
-                                setTextColor(COLOR_INK_SOFT)
-                                textSize = 12f
-                                typeface = inter(500)
-                                setPadding(0, dp(5), 0, 0)
-                            }
-                            statusUrl = TextView(this@MainActivity).apply {
-                                setTextColor(COLOR_INK_SOFT)
-                                textSize = 11f
-                                typeface = inter(450)
-                                setPadding(0, dp(3), 0, 0)
-                                ellipsize = TextUtils.TruncateAt.MIDDLE
-                                setSingleLine(true)
-                            }
-                            addView(statusTitle, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                            addView(statusDetail, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                            addView(statusUrl, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                        TextView(this@MainActivity).apply {
+                            text = "Server"
+                            setTextColor(COLOR_INK)
+                            textSize = 22f
+                            typeface = inter(700)
+                            includeFontPadding = false
                         },
                         LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    )
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = "✕"
+                            setTextColor(COLOR_INK_SOFT)
+                            textSize = 18f
+                            typeface = inter(650)
+                            gravity = Gravity.CENTER
+                            includeFontPadding = false
+                            isClickable = true
+                            isFocusable = true
+                            background = roundedState(Color.TRANSPARENT, 0x0F000000, dp(18).toFloat())
+                        },
+                        LinearLayout.LayoutParams(dp(36), dp(36))
                     )
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
             addView(
-                TextView(this@MainActivity).apply {
-                    text = "Connection"
-                    setTextColor(COLOR_INK_SOFT)
-                    textSize = 11f
-                    typeface = inter(700)
-                    letterSpacing = 0.08f
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
                     setPadding(0, dp(18), 0, dp(8))
-                    includeFontPadding = false
+                    statusLine = TextView(this@MainActivity).apply {
+                        setTextColor(COLOR_INK_SOFT)
+                        textSize = 13f
+                        typeface = inter(550)
+                        includeFontPadding = false
+                    }
+                    statusAddress = TextView(this@MainActivity).apply {
+                        setTextColor(COLOR_INK_SOFT)
+                        textSize = 12f
+                        typeface = inter(450)
+                        includeFontPadding = false
+                        ellipsize = TextUtils.TruncateAt.MIDDLE
+                        setSingleLine(true)
+                        setPadding(0, dp(6), 0, 0)
+                    }
+                    addView(statusLine, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                    addView(statusAddress, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
             automaticMark = TextView(this@MainActivity)
-            automaticRow = serverOptionRow(
+            automaticRow = serverRadioRow(
                 mark = automaticMark,
                 title = "Automatic",
-                detail = "Recommended. Finds your local WiCi server and falls back to cloud.",
-                badge = "Recommended"
+                detail = "Local box, falls back to cloud"
             ).apply {
                 setOnClickListener {
                     manualMode = false
                     updateModeUi()
                 }
             }
-            addView(automaticRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(automaticRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            })
 
             manualMark = TextView(this@MainActivity)
-            manualRow = serverOptionRow(
+            manualRow = serverRadioRow(
                 mark = manualMark,
                 title = "Manual",
-                detail = "Use a specific server address.",
-                badge = null
+                detail = "Enter a server address"
             ).apply {
                 setOnClickListener {
                     manualMode = true
@@ -3033,12 +3007,10 @@ class MainActivity : Activity() {
                     updateModeUi()
                 }
             }
-            addView(manualRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(10)
-            })
+            addView(manualRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             manualFieldGroup = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(0, dp(12), 0, 0)
+                setPadding(dp(34), dp(4), 0, dp(4))
                 addView(
                     TextView(this@MainActivity).apply {
                         text = "Server address"
@@ -3055,17 +3027,95 @@ class MainActivity : Activity() {
                 })
             }
             addView(manualFieldGroup, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Account"
+                    setTextColor(COLOR_INK)
+                    textSize = 14f
+                    typeface = inter(650)
+                    includeFontPadding = false
+                    setPadding(0, dp(22), 0, dp(10))
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            )
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(6), 0, dp(8))
+                    isClickable = true
+                    isFocusable = true
+                    background = roundedState(Color.TRANSPARENT, 0x08000000, dp(8).toFloat())
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = "G"
+                            setTextColor(COLOR_INK)
+                            textSize = 15f
+                            typeface = inter(800)
+                            includeFontPadding = false
+                            gravity = Gravity.CENTER
+                            background = rounded(COLOR_SURFACE, dp(15).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+                        },
+                        LinearLayout.LayoutParams(dp(30), dp(30)).apply {
+                            rightMargin = dp(12)
+                        }
+                    )
+                    addView(
+                        LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.VERTICAL
+                            accountTitle = TextView(this@MainActivity).apply {
+                                setTextColor(COLOR_INK)
+                                textSize = 14f
+                                typeface = inter(650)
+                                includeFontPadding = false
+                                maxLines = 1
+                                ellipsize = TextUtils.TruncateAt.END
+                            }
+                            accountDetail = TextView(this@MainActivity).apply {
+                                setTextColor(COLOR_INK_SOFT)
+                                textSize = 12f
+                                typeface = inter(500)
+                                includeFontPadding = false
+                                setPadding(0, dp(5), 0, 0)
+                            }
+                            addView(accountTitle, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                            addView(accountDetail, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                        },
+                        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    )
+                    signOutAction = TextView(this@MainActivity).apply {
+                        text = "Sign out"
+                        setTextColor(COLOR_ACCENT)
+                        textSize = 13f
+                        typeface = inter(650)
+                        includeFontPadding = false
+                        gravity = Gravity.CENTER
+                        visibility = View.GONE
+                        isClickable = true
+                        isFocusable = true
+                        background = roundedState(Color.TRANSPARENT, 0x0F000000, dp(16).toFloat())
+                        setOnClickListener {
+                            clearGoogleAccount()
+                            updateAccountUi()
+                        }
+                    }
+                    addView(signOutAction, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)).apply {
+                        leftMargin = dp(8)
+                    })
+                    setOnClickListener {
+                        if (googleAccountEmail() == null) beginGoogleSignIn()
+                    }
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            )
         }
         val dialog = AlertDialog.Builder(this)
             .setView(content)
             .create()
-        dialog.setOnShowListener {
-            dialog.window?.setBackgroundDrawable(rounded(COLOR_SURFACE, dp(18).toFloat()))
-        }
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
-            setPadding(dp(24), 0, dp(24), dp(18))
+            setPadding(0, dp(12), 0, 0)
             addView(
                 dialogActionText("Cancel", COLOR_INK_SOFT).apply {
                     setOnClickListener { dialog.dismiss() }
@@ -3082,11 +3132,9 @@ class MainActivity : Activity() {
                                 return@setOnClickListener
                             }
                             saveBackendBaseUrl(normalized)
-                            albumStatus?.text = "SERVER UPDATED"
                             Log.i(TAG, "Backend base URL updated base=$normalized source=${backendSourceLabel()} gallery=${galleryUrl()}")
                         } else {
                             clearBackendBaseUrlOverride()
-                            albumStatus?.text = "AUTOMATIC SERVER"
                             Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
                         }
                         dialog.dismiss()
@@ -3098,7 +3146,13 @@ class MainActivity : Activity() {
             )
         }
         content.addView(actions, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(rounded(COLOR_SURFACE, dp(18).toFloat()))
+            val close = (content.getChildAt(0) as? LinearLayout)?.getChildAt(1)
+            close?.setOnClickListener { dialog.dismiss() }
+        }
         updateModeUi()
+        updateAccountUi()
         dialog.show()
     }
 
@@ -3214,7 +3268,16 @@ class MainActivity : Activity() {
 
                         override fun onServiceResolved(service: NsdServiceInfo) {
                             val addresses = nsdHostAddresses(service)
-                            val host = chooseBackendHostAddress(addresses) ?: fallbackBackendHostAddress(service)
+                            val directHost = chooseBackendHostAddress(addresses)
+                            val fallbackHost = if (directHost == null || directHost.contains(":")) {
+                                fallbackBackendHostAddress(service)
+                            } else {
+                                null
+                            }
+                            val host = listOfNotNull(directHost, fallbackHost)
+                                .firstOrNull { !it.contains(":") }
+                                ?: directHost
+                                ?: fallbackHost
                             val port = service.port
                             val base = host?.let { normalizeBackendBaseUrl(httpBackendUrl(it, port)) }
                             backendHandler.post {
@@ -3836,7 +3899,9 @@ class MainActivity : Activity() {
         private const val PREFS_NAME = "android-album-demo"
         private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
         private const val PREF_BACKEND_BASE_URL = "backend_base_url"
+        private const val PREF_GOOGLE_ACCOUNT_EMAIL = "google_account_email"
         private const val DEFAULT_BACKEND_BASE_URL = "http://app.wici.ai:54228"
+        private const val GOOGLE_OAUTH_CLIENT_ID = ""
         private const val NSD_BACKEND_SERVICE_TYPE = "_wici-backend._tcp."
         private const val NSD_DISCOVERY_TIMEOUT_MS = 3_000L
         private const val ADD_TILE_ID = "__add_photo__"
