@@ -51,6 +51,10 @@
         text-decoration: none;
       }
 
+      p {
+        text-wrap: pretty;
+      }
+
       button,
       a {
         -webkit-tap-highlight-color: transparent;
@@ -88,13 +92,11 @@
         font-weight: 700;
       }
 
-      .wordmark-mark {
+      .wordmark-icon {
         width: 28px;
         height: 28px;
         border-radius: 7px;
-        background:
-          radial-gradient(circle at 68% 30%, rgba(255, 255, 255, 0.85), transparent 18px),
-          linear-gradient(135deg, var(--accent), #9090ff);
+        object-fit: cover;
         box-shadow: 0 10px 24px rgba(91, 91, 246, 0.22);
       }
 
@@ -122,7 +124,7 @@
       }
 
       .hero-copy {
-        max-width: 760px;
+        max-width: 1040px;
       }
 
       .eyebrow,
@@ -143,16 +145,19 @@
         font-family: "Space Grotesk", Inter, sans-serif;
         line-height: 0.98;
         letter-spacing: 0;
+        text-wrap: balance;
       }
 
       h1 {
-        max-width: 850px;
-        font-size: clamp(58px, 10vw, 124px);
+        max-width: 1120px;
+        font-size: 76px;
         font-weight: 700;
+        white-space: nowrap;
       }
 
       h2 {
-        font-size: clamp(34px, 5.5vw, 68px);
+        max-width: 1120px;
+        font-size: 52px;
         font-weight: 700;
       }
 
@@ -162,10 +167,10 @@
       }
 
       .lede {
-        max-width: 690px;
+        max-width: 620px;
         margin: 28px 0 0;
         color: var(--ink-soft);
-        font-size: clamp(18px, 2vw, 23px);
+        font-size: 21px;
       }
 
       .hero-actions,
@@ -275,7 +280,7 @@
       .stage-copy strong {
         display: block;
         font-family: "Space Grotesk", Inter, sans-serif;
-        font-size: clamp(28px, 4vw, 48px);
+        font-size: 42px;
         line-height: 1;
       }
 
@@ -364,11 +369,59 @@
         padding: 86px 0;
       }
 
-      .split {
-        display: grid;
-        grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
-        gap: clamp(32px, 6vw, 84px);
-        align-items: start;
+      .flow-header {
+        max-width: 1120px;
+      }
+
+      .flow-header p {
+        max-width: 640px;
+        margin: 22px 0 0;
+        color: var(--ink-soft);
+        font-size: 18px;
+      }
+
+      .step-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 16px;
+        color: var(--accent);
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .step-label::before {
+        display: inline-flex;
+        width: 28px;
+        height: 28px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(91, 91, 246, 0.24);
+        border-radius: 50%;
+        background: rgba(91, 91, 246, 0.07);
+        color: var(--accent);
+        content: attr(data-step);
+      }
+
+      .download-panel {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 28px;
+        margin-top: 38px;
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius);
+        padding: 28px;
+        background: rgba(255, 255, 255, 0.42);
+      }
+
+      .download-panel p {
+        max-width: 540px;
+        margin: 0;
+        color: var(--ink-soft);
       }
 
       .section-copy p {
@@ -378,7 +431,55 @@
         font-size: 18px;
       }
 
+      .compute-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+        gap: 1px;
+        margin-top: 42px;
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--hairline);
+      }
+
+      .compute-card {
+        min-width: 0;
+        min-height: 380px;
+        padding: clamp(26px, 4vw, 38px);
+        background: rgba(255, 255, 255, 0.38);
+      }
+
+      .compute-card.local {
+        background: rgba(255, 255, 255, 0.52);
+      }
+
+      .compute-card .mode {
+        display: block;
+        color: var(--accent);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .compute-card h3 {
+        max-width: 440px;
+        margin-top: 18px;
+      }
+
+      .compute-card p {
+        max-width: 500px;
+        margin: 14px 0 0;
+        color: var(--ink-soft);
+      }
+
+      .compute-card .terminal {
+        margin-top: 28px;
+      }
+
       .terminal {
+        min-width: 0;
         border: 1px solid #d8d8dc;
         border-radius: var(--radius);
         overflow: hidden;
@@ -424,21 +525,23 @@
       }
 
       pre {
+        max-width: 100%;
         margin: 0;
         padding: 24px;
         overflow-x: auto;
         color: #f1f1ff;
         font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-        font-size: clamp(13px, 1.45vw, 15px);
+        font-size: 12px;
         line-height: 1.7;
-        white-space: pre-wrap;
-        word-break: break-word;
+        white-space: pre;
+        word-break: normal;
       }
 
       .terminal-note {
         margin: 16px 0 0;
         color: var(--ink-soft);
         font-size: 14px;
+        text-wrap: pretty;
       }
 
       .steps {
@@ -476,36 +579,9 @@
         font-size: 22px;
       }
 
-      .step p,
-      .run-card p {
+      .step p {
         margin: 12px 0 0;
         color: var(--ink-soft);
-      }
-
-      .run-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 1px;
-        margin-top: 42px;
-        border: 1px solid var(--hairline);
-        border-radius: var(--radius);
-        overflow: hidden;
-        background: var(--hairline);
-      }
-
-      .run-card {
-        min-height: 250px;
-        padding: 34px;
-        background: rgba(255, 255, 255, 0.38);
-      }
-
-      .run-card .mode {
-        color: var(--accent);
-        font-family: "JetBrains Mono", ui-monospace, monospace;
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
       }
 
       footer {
@@ -553,15 +629,19 @@
           max-width: calc(100% - 44px);
         }
 
-        .split,
         .steps,
-        .run-grid {
+        .compute-grid {
           grid-template-columns: 1fr;
         }
 
         .step,
-        .run-card {
+        .compute-card {
           min-height: auto;
+        }
+
+        .download-panel {
+          align-items: flex-start;
+          flex-direction: column;
         }
       }
 
@@ -580,7 +660,7 @@
           font-size: 17px;
         }
 
-        .wordmark-mark {
+        .wordmark-icon {
           width: 24px;
           height: 24px;
         }
@@ -592,7 +672,20 @@
         }
 
         h1 {
-          font-size: clamp(48px, 16vw, 72px);
+          font-size: 52px;
+          white-space: normal;
+        }
+
+        h2 {
+          font-size: 34px;
+        }
+
+        .lede {
+          font-size: 18px;
+        }
+
+        .stage-copy strong {
+          font-size: 30px;
         }
 
         .spatial-stage {
@@ -657,7 +750,7 @@
       <header class="topbar">
         <nav class="nav" aria-label="Primary navigation">
           <a class="wordmark" href="#top" aria-label="Spatial Album home">
-            <span class="wordmark-mark" aria-hidden="true"></span>
+            <img class="wordmark-icon" src="assets/app-icon.png" alt="" width="28" height="28" />
             <span>Spatial Album</span>
           </a>
           <div class="nav-links">
@@ -673,14 +766,14 @@
             <p class="eyebrow">Native Android spatial reframing</p>
             <h1 id="hero-title">One photo. Step inside it.</h1>
             <p class="lede">
-              Spatial Album turns a single photo into a 3D scene you can orbit, pan, and reframe -
-              right on your phone.
+              Spatial Album turns one flat image into a 3D scene you can orbit, pan, and reframe on
+              your phone.
             </p>
             <div class="hero-actions">
               <a class="button primary" href="https://github.com/wici-ai/spatial-album/releases/latest">
                 Download the app
               </a>
-              <a class="text-link" href="#demo">See it move</a>
+              <a class="text-link" href="#compute">Choose compute</a>
             </div>
           </div>
 
@@ -693,7 +786,7 @@
               <div class="stage-grid" aria-hidden="true"></div>
               <div class="stage-copy">
                 <span class="kicker">Spatial viewer</span>
-                <strong>Flat image, real depth.</strong>
+                <strong>Flat image.<br />Real depth.</strong>
                 <span>Move your pointer across the frame to tilt through the scene.</span>
               </div>
               <div class="depth-scene" data-depth-scene>
@@ -710,41 +803,72 @@
           </div>
         </section>
 
-        <section id="install" aria-labelledby="install-title">
-          <div class="section-inner split">
-            <div class="section-copy">
-              <p class="kicker">Run it on your own GPU</p>
-              <h2 id="install-title">Local backend, one command.</h2>
+        <section id="download" aria-labelledby="download-title">
+          <div class="section-inner">
+            <div class="flow-header">
+              <p class="step-label" data-step="1">Download the app</p>
+              <h2 id="download-title">Install Spatial Album on Android.</h2>
               <p>
-                Have a capable GPU? Host the backend locally in one command. The app finds it on your
-                network automatically.
+                Start with the Android app. The latest release page always points at the current APK
+                and release notes.
               </p>
+            </div>
+            <div class="download-panel">
+              <p>After installing, choose whether Spatial Album computes scenes in the cloud or on your own GPU.</p>
               <div class="section-actions">
-                <a class="button secondary" href="https://github.com/wici-ai/spatial-album/releases/latest">
+                <a class="button primary" href="https://github.com/wici-ai/spatial-album/releases/latest">
                   Download APK
                 </a>
-                <a class="text-link" href="https://github.com/wici-ai/spatial-album/releases/latest">Latest release</a>
+                <a class="text-link" href="#compute">Next step</a>
               </div>
             </div>
+          </div>
+        </section>
 
-            <div>
-              <div class="terminal" aria-label="One-click local backend install command">
-                <div class="terminal-bar">
-                  <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
-                  <button class="copy-button" type="button" data-copy-command>Copy</button>
-                </div>
-                <pre><code id="install-command">git clone --recurse-submodules https://github.com/wici-ai/spatial-album-backend.git &amp;&amp; cd spatial-album-backend/deploy &amp;&amp; ./install.sh</code></pre>
-              </div>
-              <p class="terminal-note">
-                Checks the GPU, pulls model weights, starts the backend, and advertises it on your LAN.
+        <section id="compute" aria-labelledby="compute-title">
+          <div class="section-inner">
+            <div class="flow-header">
+              <p class="step-label" data-step="2">Choose where the 3D is computed</p>
+              <h2 id="compute-title">Use the cloud, or keep it local.</h2>
+              <p>
+                Spatial Album can run against the hosted backend, or against a local backend on your
+                own NVIDIA GPU.
               </p>
+            </div>
+            <div class="compute-grid">
+              <article class="compute-card">
+                <span class="mode">Cloud</span>
+                <h3>Sign in with Google, nothing to set up.</h3>
+                <p>
+                  Use the hosted backend when you want the shortest path from download to orbit. The
+                  app handles cloud sign-in with Google.
+                </p>
+              </article>
+              <article class="compute-card local">
+                <span class="mode">Your own GPU (local)</span>
+                <h3>Fully local, private, fast.</h3>
+                <p>
+                  Run the backend yourself with one command. The app discovers it on your network
+                  automatically.
+                </p>
+                <div class="terminal" aria-label="One-click local backend install command">
+                  <div class="terminal-bar">
+                    <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+                    <button class="copy-button" type="button" data-copy-command>Copy</button>
+                  </div>
+                  <pre><code id="install-command">curl -fsSL https://raw.githubusercontent.com/wici-ai/spatial-album-backend/main/deploy/install.sh | bash</code></pre>
+                </div>
+                <p class="terminal-note">
+                  Checks the GPU, pulls weights, starts the backend, and lets the app find it automatically.
+                </p>
+              </article>
             </div>
           </div>
         </section>
 
         <section aria-labelledby="how-title">
           <div class="section-inner">
-            <div class="section-copy">
+            <div class="flow-header">
               <p class="kicker">How it works</p>
               <h2 id="how-title">A real 3D scene from one frame.</h2>
             </div>
@@ -768,27 +892,6 @@
                 <span class="step-marker">4</span>
                 <h3>Reframe</h3>
                 <p>Orbit, pan, refine, and generate a new composition from the scene.</p>
-              </article>
-            </div>
-          </div>
-        </section>
-
-        <section aria-labelledby="run-title">
-          <div class="section-inner">
-            <div class="section-copy">
-              <p class="kicker">Two ways to run</p>
-              <h2 id="run-title">Use the cloud, or keep it local.</h2>
-            </div>
-            <div class="run-grid">
-              <article class="run-card">
-                <span class="mode">Cloud</span>
-                <h3>Sign in with Google, nothing to set up.</h3>
-                <p>Use the hosted backend when you want the shortest path from install to orbit.</p>
-              </article>
-              <article class="run-card">
-                <span class="mode">Your GPU</span>
-                <h3>Fully local, private, fast.</h3>
-                <p>Run the backend on your own NVIDIA GPU and keep photos on your network.</p>
               </article>
             </div>
           </div>
