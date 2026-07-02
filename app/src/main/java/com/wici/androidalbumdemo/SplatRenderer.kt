@@ -292,10 +292,12 @@ class SplatRenderer(
                 TAG,
                 "sourceCamera asset=$assetName fx=${camera.fx} fy=${camera.fy} " +
                     "cx=${camera.cx} cy=${camera.cy} source=${camera.width}x${camera.height} " +
-                    "cameraSource=${camera.source} exact=${camera.exact} viewport=${viewportW}x${viewportH}"
+                    "cameraSource=${camera.source} exact=${camera.exact} viewport=${viewportW}x${viewportH} " +
+                    interactionProjectionLog()
             )
         } else {
             setAutoFitProjection()
+            Log.i(TAG, "autoFitProjection asset=$assetName viewport=${viewportW}x${viewportH} ${interactionProjectionLog()}")
         }
         createFbo(viewportW, viewportH)
         createPostFbos(viewportW, viewportH)
@@ -524,7 +526,28 @@ class SplatRenderer(
 
     private fun setAutoFitProjection() {
         setFullContentRect()
-        Matrix.perspectiveM(proj, 0, AUTO_FIT_FOV_DEG, viewportW.toFloat() / viewportH.toFloat(), NEAR_PLANE, FAR_PLANE)
+        val focal = sourceLikeFocalPx()
+        for (i in proj.indices) proj[i] = 0f
+        proj[0] = 2f * focal / viewportW.toFloat()
+        proj[5] = 2f * focal / viewportH.toFloat()
+        proj[10] = -(FAR_PLANE + NEAR_PLANE) / (FAR_PLANE - NEAR_PLANE)
+        proj[11] = -1f
+        proj[14] = -(2f * FAR_PLANE * NEAR_PLANE) / (FAR_PLANE - NEAR_PLANE)
+    }
+
+    private fun sourceLikeFocalPx(): Float =
+        (SOURCE_FOCAL_PER_MIN_SIDE * min(viewportW, viewportH).toFloat()).coerceAtLeast(1f)
+
+    private fun interactionProjectionLog(): String {
+        val focalPx = abs(proj[5]) * viewportH.toFloat() * 0.5f
+        val hFov = Math.toDegrees((2f * atan(viewportW.toFloat() / (2f * focalPx))).toDouble())
+        val vFov = Math.toDegrees((2f * atan(viewportH.toFloat() / (2f * focalPx))).toDouble())
+        val mode = when {
+            autoFitActive -> "autoFit"
+            sourceCamera != null -> "source"
+            else -> "bare"
+        }
+        return "mode=$mode focalPx=%.1f hFov=%.1f vFov=%.1f".format(focalPx, hFov, vFov)
     }
 
     private fun maybeApplyCameraSafety(m: SplatModel) {
@@ -551,6 +574,7 @@ class SplatRenderer(
             Log.w(
                 TAG,
                 "cameraSafety photoId=$photoId mode=auto-fit reason=${check.reason} count=${m.count} " +
+                    "radius=${m.radius} distance=${autoFitDistance(m)} " +
                     "validCorners=${check.validCorners} ndc=${check.minNdcX},${check.minNdcY}.." +
                     "${check.maxNdcX},${check.maxNdcY} visiblePx=${check.visiblePx.toInt()} " +
                     "bbox=${m.minX},${m.minY},${m.minZ}..${m.maxX},${m.maxY},${m.maxZ}"
@@ -559,6 +583,7 @@ class SplatRenderer(
             Log.i(
                 TAG,
                 "cameraSafety photoId=$photoId mode=rest count=${m.count} " +
+                    "radius=${m.radius} " +
                     "validCorners=${check.validCorners} ndc=${check.minNdcX},${check.minNdcY}.." +
                     "${check.maxNdcX},${check.maxNdcY} visiblePx=${check.visiblePx.toInt()}"
             )
@@ -654,9 +679,9 @@ class SplatRenderer(
         val halfW = max(0.01f, (m.maxX - m.minX) * 0.5f)
         val halfH = max(0.01f, (m.maxY - m.minY) * 0.5f)
         val halfD = max(0.01f, (m.maxZ - m.minZ) * 0.5f)
-        val vFov = Math.toRadians(AUTO_FIT_FOV_DEG.toDouble()).toFloat()
-        val aspect = viewportW.toFloat() / viewportH.toFloat()
-        val hFov = 2f * atan(tan(vFov * 0.5f) * aspect)
+        val focal = sourceLikeFocalPx()
+        val vFov = 2f * atan(viewportH.toFloat() / (2f * focal))
+        val hFov = 2f * atan(viewportW.toFloat() / (2f * focal))
         val distanceForH = halfW / tan(hFov * 0.5f)
         val distanceForV = halfH / tan(vFov * 0.5f)
         return (max(distanceForH, distanceForV) + halfD) * AUTO_FIT_MARGIN
@@ -2357,11 +2382,11 @@ class SplatRenderer(
         private const val SOURCE_LOOK_AT_Z = 1f
         private const val SOURCE_FOCAL_35MM = 30f
         private const val SOURCE_SENSOR_DIAGONAL = 43.266617f
+        private const val SOURCE_FOCAL_PER_MIN_SIDE = 1.25f
         private const val SOURCE_REST_ZOOM = 1f
         private const val SOURCE_REST_EPSILON = 0.001f
         private const val MIN_ZOOM = 0.42f
         private const val MAX_ZOOM = 1.85f
-        private const val AUTO_FIT_FOV_DEG = 55f
         private const val AUTO_FIT_MARGIN = 1.18f
         private const val CAMERA_SAFETY_MIN_SPLATS = 4_096
         private const val CAMERA_SAFETY_MIN_VISIBLE_PX = 64f
