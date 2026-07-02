@@ -220,7 +220,20 @@ class SplatRenderer(
 
     fun dolly(scale: Float) {
         if (!scale.isFinite() || scale <= 0f) return
-        zoom = (zoom / scale.pow(WEB_ZOOM_SPEED)).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        if (sourceCameraPresent()) {
+            val model = model
+            val foregroundDistance = if (model != null) {
+                foregroundPanDistance(model, SOURCE_LOOK_AT_Z)
+            } else {
+                SOURCE_LOOK_AT_Z
+            }
+            val zoomFraction = 1f - scale.pow(-WEB_ZOOM_SPEED)
+            val distance = SOURCE_LOOK_AT_Z * zoom
+            val nextDistance = distance - PAN_GAIN * foregroundDistance * zoomFraction
+            zoom = (nextDistance / SOURCE_LOOK_AT_Z).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        } else {
+            zoom = (zoom / scale.pow(WEB_ZOOM_SPEED)).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        }
         sortDirty = true
     }
 
@@ -2626,7 +2639,7 @@ class SplatRenderer(
         private const val SOURCE_FOCAL_PER_MIN_SIDE = 1.25f
         private const val SOURCE_REST_ZOOM = 1f
         private const val SOURCE_REST_EPSILON = 0.001f
-        private const val MIN_ZOOM = 0.42f
+        private const val MIN_ZOOM = 0.18f
         private const val MAX_ZOOM = 1.85f
         private const val AUTO_FIT_MARGIN = 1.18f
         private const val CAMERA_SAFETY_MIN_SPLATS = 4_096
