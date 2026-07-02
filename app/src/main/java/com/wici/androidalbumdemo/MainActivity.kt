@@ -145,9 +145,6 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         applyIntentOverrides(intent)
-        if (applyDebugViewerIntent(intent)) {
-            return
-        }
         if (showViewerFromIntent(intent)) {
             Log.i(TAG, "Direct viewer intent handled while activity was alive")
         } else {
@@ -171,49 +168,6 @@ class MainActivity : Activity() {
         } else {
             null
         }
-    }
-
-    private fun applyDebugViewerIntent(intent: Intent): Boolean {
-        if (
-            !intent.hasExtra("debugPanPx") &&
-            !intent.hasExtra("debugDollyScale") &&
-            !intent.hasExtra("debugOrbitDx")
-        ) {
-            return false
-        }
-        val viewer = glView
-        if (viewer == null) {
-            Log.w(TAG, "debugViewerIntentIgnored viewerPresent=false")
-            return true
-        }
-        if (intent.hasExtra("debugPanPx")) {
-            val dxPx = intent.getFloatExtra("debugPanPx", Float.NaN)
-            if (dxPx.isFinite()) {
-                viewer.debugInjectPan(dxPx, 0f)
-                Log.i(TAG, "debugPanIntent dxPx=$dxPx")
-            } else {
-                Log.w(TAG, "debugPanIgnored dxPx=$dxPx")
-            }
-        }
-        if (intent.hasExtra("debugDollyScale")) {
-            val scale = intent.getFloatExtra("debugDollyScale", Float.NaN)
-            if (scale.isFinite() && scale > 0f) {
-                viewer.debugInjectDolly(scale)
-                Log.i(TAG, "debugDollyIntent scale=$scale")
-            } else {
-                Log.w(TAG, "debugDollyIgnored scale=$scale")
-            }
-        }
-        if (intent.hasExtra("debugOrbitDx")) {
-            val dxPx = intent.getFloatExtra("debugOrbitDx", Float.NaN)
-            if (dxPx.isFinite()) {
-                viewer.debugInjectOrbit(dxPx, 0f)
-                Log.i(TAG, "debugOrbitIntent dxPx=$dxPx")
-            } else {
-                Log.w(TAG, "debugOrbitIgnored dxPx=$dxPx")
-            }
-        }
-        return true
     }
 
     private fun showViewerFromIntent(intent: Intent): Boolean {

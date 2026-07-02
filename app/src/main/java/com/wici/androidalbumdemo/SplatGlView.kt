@@ -207,33 +207,6 @@ class SplatGlView(
         queueEvent { splatRenderer.resetView() }
     }
 
-    fun debugInjectPan(dxPx: Float, dyPx: Float = 0f) {
-        if (!dxPx.isFinite() || !dyPx.isFinite()) return
-        queueEvent {
-            splatRenderer.pan(dxPx, dyPx)
-            Log.i(TOUCH_TAG, "debugPanInjected dxPx=$dxPx dyPx=$dyPx")
-        }
-        requestRender()
-    }
-
-    fun debugInjectDolly(scale: Float) {
-        if (!scale.isFinite() || scale <= 0f) return
-        queueEvent {
-            splatRenderer.dolly(scale)
-            Log.i(TOUCH_TAG, "debugDollyInjected scale=$scale")
-        }
-        requestRender()
-    }
-
-    fun debugInjectOrbit(dxPx: Float, dyPx: Float = 0f) {
-        if (!dxPx.isFinite() || !dyPx.isFinite()) return
-        queueEvent {
-            splatRenderer.orbit(dxPx, dyPx)
-            Log.i(TOUCH_TAG, "debugOrbitInjected dxPx=$dxPx dyPx=$dyPx")
-        }
-        requestRender()
-    }
-
     private fun pinchDistance(event: MotionEvent): Float {
         if (event.pointerCount < 2) return 0f
         val dx = event.getX(0) - event.getX(1)
