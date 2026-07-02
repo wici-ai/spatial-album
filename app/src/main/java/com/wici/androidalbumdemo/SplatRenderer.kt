@@ -216,7 +216,7 @@ class SplatRenderer(
         zoom = if (sourceCamera != null || autoFitActive) SOURCE_REST_ZOOM else 1f
         panX = 0f
         panY = 0f
-        resetSortUploadState()
+        resetSortForViewChange()
         Log.i(TAG, "viewReset photoId=$photoId")
     }
 
@@ -575,6 +575,15 @@ class SplatRenderer(
         lastSubmittedSortPitch = Float.NaN
         lastUploadedSortYaw = Float.NaN
         lastUploadedSortPitch = Float.NaN
+        sortDirty = true
+    }
+
+    private fun resetSortForViewChange() {
+        synchronized(pendingSortLock) {
+            pendingSort = null
+        }
+        lastSubmittedSortYaw = Float.NaN
+        lastSubmittedSortPitch = Float.NaN
         sortDirty = true
     }
 
