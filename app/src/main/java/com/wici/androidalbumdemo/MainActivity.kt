@@ -37,6 +37,7 @@ import android.text.InputType
 import android.text.TextUtils
 import android.util.Base64
 import android.util.Log
+import android.util.Size
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -78,6 +79,7 @@ class MainActivity : Activity() {
     private lateinit var generateLabel: TextView
     private lateinit var generateSpinner: ProgressBar
     private val networkExecutor = Executors.newSingleThreadExecutor()
+    private val thumbnailExecutor = Executors.newFixedThreadPool(THUMBNAIL_CONCURRENCY)
     private val previewBakeExecutor = Executors.newFixedThreadPool(PREVIEW_BAKE_CONCURRENCY)
     private val previewBakeInFlight = ConcurrentHashMap.newKeySet<String>()
     private var assetName: String = "brush-clean-noshr-10k.ply"
@@ -1439,10 +1441,13 @@ class MainActivity : Activity() {
             return
         }
         cell.thumbnail.setImageBitmap(null)
-        networkExecutor.execute {
+        thumbnailExecutor.execute {
             try {
-                val bitmap = photo.localUri
-                    ?.let { decodeLocalBitmap(it, THUMBNAIL_MAX_SIDE) }
+                val started = SystemClock.elapsedRealtimeNanos()
+                val workerThread = Thread.currentThread().name
+                val localUri = photo.localUri
+                val bitmap = localUri
+                    ?.let { loadDeviceThumbnail(it) }
                     ?: fetchBitmap(photo.thumbnailUrl)
                 synchronized(thumbnailCache) {
                     thumbnailCache[photo.photoId] = bitmap
@@ -1450,13 +1455,33 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (cell.boundPhotoId == photo.photoId) {
                         cell.thumbnail.setImageBitmap(bitmap)
-                        Log.i(TAG, "Thumbnail loaded photoId=${photo.photoId}")
+                        Log.i(
+                            TAG,
+                            "Thumbnail loaded photoId=${photo.photoId} source=${if (localUri != null) "device" else "remote"} " +
+                                "size=${bitmap.width}x${bitmap.height} elapsedMs=${elapsedMs(started)} thread=$workerThread"
+                        )
                     }
                 }
             } catch (exc: Exception) {
                 Log.w(TAG, "Thumbnail failed photoId=${photo.photoId}: ${exc.message}")
             }
         }
+    }
+
+    private fun loadDeviceThumbnail(uri: Uri): Bitmap? {
+        val targetSize = Size(THUMBNAIL_MAX_SIDE, THUMBNAIL_MAX_SIDE)
+        val systemThumbnail = runCatching {
+            contentResolver.loadThumbnail(uri, targetSize, null)
+        }.onFailure {
+            Log.w(TAG, "System thumbnail failed uri=$uri: ${it.message}")
+        }.getOrNull()
+        if (systemThumbnail != null) return systemThumbnail
+
+        return runCatching {
+            decodeLocalBitmap(uri, THUMBNAIL_MAX_SIDE)
+        }.onFailure {
+            Log.w(TAG, "Fallback thumbnail decode failed uri=$uri: ${it.message}")
+        }.getOrNull()
     }
 
     private fun loadDisplayBitmap(photo: AlbumPhoto): Bitmap =
@@ -2233,6 +2258,7 @@ class MainActivity : Activity() {
         stopBackendDiscovery()
         glView?.shutdown()
         networkExecutor.shutdownNow()
+        thumbnailExecutor.shutdownNow()
         previewBakeExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -4280,6 +4306,7 @@ class MainActivity : Activity() {
         private const val ORBIT_PREVIEW_CACHE_VERSION = "webp360-v1"
         private const val ORBIT_PREVIEW_CACHE_MAX_BYTES = 96L * 1024L * 1024L
         private const val PREVIEW_BAKE_CONCURRENCY = 3
+        private val THUMBNAIL_CONCURRENCY = min(4, Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
         private const val DEFAULT_SPLAT_DENSITY = "full"
         private const val SPLAT_ROW_BYTES = 32
         private const val INGEST_SPLAT_ACCEPT_HEADER = "X-Wici-Splat-Accept"
@@ -4291,7 +4318,7 @@ class MainActivity : Activity() {
         private const val REQUEST_READ_PHOTOS = 4202
         private const val PICK_IMAGES_MAX = 100
         private const val DEVICE_PHOTO_LIMIT = 600
-        private const val THUMBNAIL_MAX_SIDE = 720
+        private const val THUMBNAIL_MAX_SIDE = 400
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
         private const val PREVIEW_UPLOAD_MAX_SIDE = 1536
         private const val PREVIEW_UPLOAD_JPEG_QUALITY = 90
