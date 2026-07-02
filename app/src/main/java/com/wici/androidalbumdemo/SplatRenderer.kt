@@ -416,7 +416,7 @@ class SplatRenderer(
         GLES30.glClearColor(0.949f, 0.953f, 0.961f, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         if (usePostPass) {
-            drawComposite()
+            drawComposite(softenBoundary = !releaseCaptureRequested)
         } else {
             drawRawBlit()
         }
@@ -2217,7 +2217,7 @@ class SplatRenderer(
         }
     }
 
-    private fun drawComposite() {
+    private fun drawComposite(softenBoundary: Boolean) {
         GLES30.glDisable(GLES30.GL_BLEND)
         GLES30.glUseProgram(blitProgram)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
@@ -2226,12 +2226,19 @@ class SplatRenderer(
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, fillTex[0])
         GLES30.glUniform1i(GLES30.glGetUniformLocation(blitProgram, "uFill"), 1)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, fillTex[2])
+        GLES30.glUniform1i(GLES30.glGetUniformLocation(blitProgram, "uSoftFill"), 2)
         GLES30.glUniform2f(
             GLES30.glGetUniformLocation(blitProgram, "uFullTexel"),
             1f / viewportW.toFloat(),
             1f / viewportH.toFloat()
         )
         GLES30.glUniform1f(GLES30.glGetUniformLocation(blitProgram, "uDilationPx"), FINAL_DILATION_PX)
+        GLES30.glUniform1f(
+            GLES30.glGetUniformLocation(blitProgram, "uDisplaySoftBoundary"),
+            if (softenBoundary) 1f else 0f
+        )
         GLES30.glUniform2f(GLES30.glGetUniformLocation(blitProgram, "uContentMin"), contentMinX, contentMinY)
         GLES30.glUniform2f(GLES30.glGetUniformLocation(blitProgram, "uContentMax"), contentMaxX, contentMaxY)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
@@ -2901,8 +2908,10 @@ class SplatRenderer(
             precision highp float;
             uniform sampler2D uTex;
             uniform sampler2D uFill;
+            uniform sampler2D uSoftFill;
             uniform vec2 uFullTexel;
             uniform float uDilationPx;
+            uniform float uDisplaySoftBoundary;
             uniform vec2 uContentMin;
             uniform vec2 uContentMax;
             in vec2 vUv;
@@ -2930,6 +2939,28 @@ class SplatRenderer(
                 float a = clamp(splat.a, 0.0, 1.0);
                 float feather = smoothstep(0.0, 0.18, maxA);
                 vec3 colorOverFill = splat.rgb + fill * (1.0 - a);
+                if (uDisplaySoftBoundary > 0.5) {
+                    vec2 edge = uFullTexel * 18.0;
+                    float alphaSum = a;
+                    float softMaxA = maxA;
+                    float axp = texture(uTex, vUv + vec2( edge.x, 0.0)).a;
+                    float axn = texture(uTex, vUv + vec2(-edge.x, 0.0)).a;
+                    float ayp = texture(uTex, vUv + vec2(0.0,  edge.y)).a;
+                    float ayn = texture(uTex, vUv + vec2(0.0, -edge.y)).a;
+                    float adp = texture(uTex, vUv + vec2( edge.x,  edge.y)).a;
+                    float adm = texture(uTex, vUv + vec2(-edge.x,  edge.y)).a;
+                    float apm = texture(uTex, vUv + vec2( edge.x, -edge.y)).a;
+                    float amm = texture(uTex, vUv + vec2(-edge.x, -edge.y)).a;
+                    alphaSum += axp + axn + ayp + ayn + adp + adm + apm + amm;
+                    softMaxA = max(softMaxA, max(max(max(axp, axn), max(ayp, ayn)), max(max(adp, adm), max(apm, amm))));
+                    float softA = alphaSum / 9.0;
+                    vec3 coarseFill = texture(uSoftFill, vUv).rgb;
+                    fill = mix(coarseFill, fill, smoothstep(0.72, 0.98, softA));
+                    colorOverFill = splat.rgb + fill * (1.0 - a);
+                    float edgeWeight = smoothstep(0.34, 0.90, softA);
+                    colorOverFill = mix(fill, colorOverFill, edgeWeight);
+                    feather = smoothstep(0.0, 0.50, softMaxA);
+                }
                 vec3 color = mix(fill, colorOverFill, feather);
                 outColor = vec4(color, 1.0);
             }
