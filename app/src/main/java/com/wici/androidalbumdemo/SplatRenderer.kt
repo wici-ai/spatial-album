@@ -194,8 +194,7 @@ class SplatRenderer(
     )
 
     fun orbit(dx: Float, dy: Float) {
-        val radiansPerPixel =
-            (TWO_PI * WEB_ROTATE_SPEED * orbitForegroundScale()) / viewportH.coerceAtLeast(1).toFloat()
+        val radiansPerPixel = (TWO_PI * WEB_ROTATE_SPEED) / viewportH.coerceAtLeast(1).toFloat()
         val nextYaw = yaw + dx * radiansPerPixel
         val nextPitch = pitch + dy * radiansPerPixel
         yaw = nextYaw.coerceIn(-WEB_AZIMUTH_LIMIT_RAD, WEB_AZIMUTH_LIMIT_RAD)
@@ -217,14 +216,6 @@ class SplatRenderer(
             }
         }
         sortDirty = true
-    }
-
-    private fun orbitForegroundScale(): Float {
-        if (!sourceCameraPresent()) return 1f
-        val model = model ?: return 1f
-        val foregroundDistance = foregroundPanDistance(model, SOURCE_LOOK_AT_Z)
-        return sqrt((ORBIT_REFERENCE_FOREGROUND_DISTANCE / foregroundDistance).coerceAtLeast(0.0001f))
-            .coerceIn(ORBIT_MIN_SCALE, ORBIT_MAX_SCALE)
     }
 
     fun dolly(scale: Float) {
@@ -2634,9 +2625,6 @@ class SplatRenderer(
         private const val FAR_PLANE = 500f
         private const val TWO_PI = (Math.PI * 2.0).toFloat()
         private const val WEB_ROTATE_SPEED = 0.42f
-        private const val ORBIT_REFERENCE_FOREGROUND_DISTANCE = 0.35f
-        private const val ORBIT_MIN_SCALE = 0.35f
-        private const val ORBIT_MAX_SCALE = 1.0f
         private const val WEB_ZOOM_SPEED = 0.55f
         private const val PAN_GAIN = 2.762f
         private const val MIN_FOREGROUND_PAN_DISTANCE = 0.35f
