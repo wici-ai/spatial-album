@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AndroidAlbumDemo"
 include(":app")
+include(":viewer")
