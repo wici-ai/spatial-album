@@ -10,8 +10,8 @@ android {
         applicationId = "com.wici.androidalbumdemo"
         minSdk = 33
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.4"
+        versionCode = 8
+        versionName = "0.4.1"
     }
 
     compileOptions {
