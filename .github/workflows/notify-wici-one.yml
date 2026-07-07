@@ -1,0 +1,15 @@
+name: Notify Wici One on release
+on:
+  release:
+    types: [published]
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger wici-one submodule bump
+        run: |
+          curl -sSf -X POST \
+            -H "Authorization: token ${{ secrets.WICI_ONE_DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/wici-ai/wici-one/dispatches \
+            -d "{\"event_type\":\"spatial-album-release\",\"client_payload\":{\"tag\":\"${{ github.event.release.tag_name }}\"}}"
