@@ -415,13 +415,13 @@ class MainActivity : Activity() {
 
     private fun launchPhotoPicker() {
         val maxItems = try {
-            MediaStore.getPickImagesMaxLimit().coerceAtMost(PICK_IMAGES_MAX)
+            MediaStore.getPickImagesMaxLimit().takeIf { it > 1 }
         } catch (_: Exception) {
-            PICK_IMAGES_MAX
+            null
         }
         val intent = Intent(MediaStore.ACTION_PICK_IMAGES).apply {
             type = "image/*"
-            putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, maxItems)
+            maxItems?.let { putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, it) }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {
@@ -556,7 +556,7 @@ class MainActivity : Activity() {
             } else {
                 -1
             }
-            while (cursor.moveToNext() && photos.size < DEVICE_PHOTO_LIMIT) {
+            while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val displayName = cursor.getString(nameCol).orEmpty()
                 val mime = cursor.getString(mimeCol).orEmpty()
@@ -4337,8 +4337,6 @@ class MainActivity : Activity() {
         private const val PREVIEW_REVEAL_START_SCALE = 0.96f
         private const val REQUEST_PICK_IMAGES = 4201
         private const val REQUEST_READ_PHOTOS = 4202
-        private const val PICK_IMAGES_MAX = 100
-        private const val DEVICE_PHOTO_LIMIT = 600
         private const val THUMBNAIL_MAX_SIDE = 400
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
         private const val PREVIEW_UPLOAD_MAX_SIDE = 1536

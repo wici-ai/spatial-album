@@ -195,8 +195,8 @@ class SplatRenderer(
 
     fun orbit(dx: Float, dy: Float) {
         val radiansPerPixel = (TWO_PI * WEB_ROTATE_SPEED) / viewportH.coerceAtLeast(1).toFloat()
-        val nextYaw = yaw + dx * radiansPerPixel
-        val nextPitch = pitch + dy * radiansPerPixel
+        val nextYaw = yaw - dx * radiansPerPixel
+        val nextPitch = pitch - dy * radiansPerPixel
         yaw = nextYaw.coerceIn(-WEB_AZIMUTH_LIMIT_RAD, WEB_AZIMUTH_LIMIT_RAD)
         pitch = nextPitch.coerceIn(-WEB_POLAR_LIMIT_RAD, WEB_POLAR_LIMIT_RAD)
         if (abs(yaw - nextYaw) > 1e-5f || abs(pitch - nextPitch) > 1e-5f) {
@@ -242,8 +242,8 @@ class SplatRenderer(
         if (!dxPx.isFinite() || !dyPx.isFinite() || viewportW <= 1 || viewportH <= 1) return
         val metrics = panMetrics(model) ?: return
         val unitsPerPx = metrics.unitsPerPx
-        panX -= dxPx * unitsPerPx
-        panY += dyPx * unitsPerPx
+        panX += dxPx * unitsPerPx
+        panY -= dyPx * unitsPerPx
         val now = SystemClock.elapsedRealtime()
         if (now - lastPanMetricsLogMs > PAN_METRICS_LOG_INTERVAL_MS) {
             lastPanMetricsLogMs = now
