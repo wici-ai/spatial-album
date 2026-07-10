@@ -98,6 +98,7 @@ class MainActivity : Activity() {
     private var footprintScaleOverride: Float? = null
     private var splatCacheMaxBytesOverride: Long? = null
     private var viewerVisible = false
+    private var viewerInteractionActive = false
     private var previewRequestSerial = 0
     private var previewEnabled = false
     private var albumGrid: GridView? = null
@@ -200,6 +201,7 @@ class MainActivity : Activity() {
 
     private fun showAlbum() {
         viewerVisible = false
+        viewerInteractionActive = false
         previewEnabled = true
         glView?.shutdown()
         glView?.onPause()
@@ -1512,6 +1514,7 @@ class MainActivity : Activity() {
 
     private fun showPhotoScreen(photo: AlbumPhoto) {
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         glView?.shutdown()
         glView?.onPause()
@@ -1700,6 +1703,7 @@ class MainActivity : Activity() {
     private fun showReframingLoading(photo: AlbumPhoto): TextView {
         saveAlbumScrollPosition("showReframingLoading")
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         glView?.shutdown()
         glView?.onPause()
@@ -2049,6 +2053,7 @@ class MainActivity : Activity() {
         }
         saveAlbumScrollPosition("showViewer")
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         previewRequestSerial++
         cascadeRunSerial++
@@ -2101,7 +2106,8 @@ class MainActivity : Activity() {
                     }
                 }
             },
-            { beginLiveOrbit() },
+            { handleViewerInteractionStarted() },
+            { handleViewerInteractionStopped() },
             releaseCaptureEnabled,
             postPassEnabled,
             streamDensityOverride,
@@ -2192,6 +2198,7 @@ class MainActivity : Activity() {
     private fun showStaticPhoto(photo: AlbumPhoto) {
         saveAlbumScrollPosition("showStaticPhoto")
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         glView?.shutdown()
         glView?.onPause()
@@ -2297,10 +2304,15 @@ class MainActivity : Activity() {
 
     private fun handleReleaseCapture(capture: ReleaseCapture) {
         if (difixBusy || fluxBusy) return
+        if (viewerInteractionActive) {
+            Log.i(TAG, "releaseCaptureIgnored interactionActive=true asset=${capture.assetName}")
+            return
+        }
         latestCapture = capture
         fluxDataUrl = null
         finalBitmap = null
         displayMode = DisplayMode.RAW
+        Log.i(TAG, "releaseCaptureAccepted asset=${capture.assetName} size=${capture.width}x${capture.height}")
         runOnUiThread {
             overlay.visibility = View.GONE
             updateViewerControls()
@@ -2308,13 +2320,29 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun beginLiveOrbit() {
-        if (displayMode == DisplayMode.RAW && overlay.visibility != View.VISIBLE) return
-        Log.i(TAG, "Live orbit requested; hiding result overlay from mode=$displayMode")
+    private fun handleViewerInteractionStarted() {
+        val hadCapture = latestCapture != null
+        val hadFlux = fluxDataUrl != null || finalBitmap != null
+        viewerInteractionActive = true
+        latestCapture = null
+        fluxDataUrl = null
+        finalBitmap = null
         displayMode = DisplayMode.RAW
-        overlay.visibility = View.GONE
+        if (::overlay.isInitialized) overlay.visibility = View.GONE
+        Log.i(
+            TAG,
+            "viewerInteractionStarted hideGenerate=true invalidatedCapture=$hadCapture " +
+                "invalidatedFlux=$hadFlux"
+        )
         updateViewerControls()
         setPipelineStatus("Showing raw splat")
+    }
+
+    private fun handleViewerInteractionStopped() {
+        if (!viewerInteractionActive) return
+        viewerInteractionActive = false
+        Log.i(TAG, "viewerInteractionStopped waitingForReleaseCapture=true")
+        updateViewerControls()
     }
 
     private fun buildDifixMultipartBody(capture: ReleaseCapture): DifixMultipartBody {
@@ -3816,7 +3844,6 @@ class MainActivity : Activity() {
             background = roundedState(COLOR_SURFACE, 0xFFF6F7FA.toInt(), dp(22).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
             applySoftShadow(this, 3)
             setOnClickListener {
-                beginLiveOrbit()
                 viewer.resetView()
             }
         }
@@ -3871,6 +3898,11 @@ class MainActivity : Activity() {
         if (!::generateButton.isInitialized) return
         if (generateErrorOverlay != null) {
             generateButton.visibility = View.GONE
+            return
+        }
+        if (viewerInteractionActive) {
+            generateButton.visibility = View.GONE
+            styleStageButton("Generate", enabled = false, busy = false)
             return
         }
         if (displayMode == DisplayMode.FLUX && fluxDataUrl == null) {

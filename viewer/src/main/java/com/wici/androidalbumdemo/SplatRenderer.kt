@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.GZIPInputStream
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -59,7 +60,8 @@ class SplatRenderer(
     private val ingestEndpointUrl: String? = null,
     private val ingestImageUri: String? = null,
     splatCacheMaxBytes: Long? = null,
-    private val networkStreamEnabled: Boolean = true
+    private val networkStreamEnabled: Boolean = true,
+    private val requestRenderCallback: () -> Unit = {}
 ) : GLSurfaceView.Renderer {
     private var model: SplatModel? = null
     private val streamPhotoId = photoId.takeIf { it.isNotBlank() }
@@ -99,6 +101,7 @@ class SplatRenderer(
     private var releaseCaptureReason = "unknown"
     private var lastReleaseCaptureDeferredLogMs = 0L
     private val captureRunning = AtomicBoolean(false)
+    private val releaseCaptureGeneration = AtomicInteger(0)
 
     private var splatProgram = 0
     private var blitProgram = 0
@@ -216,6 +219,7 @@ class SplatRenderer(
             }
         }
         sortDirty = true
+        requestFrame("orbit")
     }
 
     fun dolly(scale: Float) {
@@ -236,6 +240,7 @@ class SplatRenderer(
             zoom = (zoom / scale.pow(WEB_ZOOM_SPEED)).coerceIn(MIN_ZOOM, MAX_ZOOM)
         }
         sortDirty = true
+        requestFrame("dolly")
     }
 
     fun pan(dxPx: Float, dyPx: Float) {
@@ -250,6 +255,7 @@ class SplatRenderer(
             logPanMetrics("pan")
         }
         sortDirty = true
+        requestFrame("pan")
     }
 
     fun resetView() {
@@ -260,6 +266,7 @@ class SplatRenderer(
         panY = 0f
         resetSortForViewChange()
         Log.i(TAG, "viewReset photoId=$photoId")
+        requestFrame("reset")
     }
 
     fun setInteractionActive(active: Boolean) {
@@ -267,12 +274,27 @@ class SplatRenderer(
         interactionActive = active
         if (!active) sortDirty = true
         Log.i(TAG, "interactionActive=$active")
+        requestFrame("interaction-$active")
     }
 
     fun requestReleaseCapture(reason: String = "unknown") {
+        val generation = releaseCaptureGeneration.incrementAndGet()
         releaseCaptureReason = reason
         releaseCaptureRequested = true
-        Log.i(TAG, "releaseCaptureRequested reason=$reason")
+        Log.i(TAG, "releaseCaptureRequested reason=$reason generation=$generation")
+        requestFrame("release-capture-request")
+    }
+
+    fun cancelReleaseCapture(reason: String = "unknown") {
+        val hadRequest = releaseCaptureRequested
+        releaseCaptureRequested = false
+        val generation = releaseCaptureGeneration.incrementAndGet()
+        Log.i(
+            TAG,
+            "releaseCaptureInvalidated reason=$reason generation=$generation " +
+                "hadRequest=$hadRequest captureRunning=${captureRunning.get()}"
+        )
+        requestFrame("release-capture-cancel")
     }
 
     fun shutdown() {
@@ -289,6 +311,10 @@ class SplatRenderer(
         streamExecutor.shutdownNow()
         model = null
         uploadedInstanceCount = 0
+    }
+
+    private fun requestFrame(reason: String) {
+        requestRenderCallback()
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -322,6 +348,7 @@ class SplatRenderer(
                         "streamComplete=$streamComplete expected=$streamExpectedCount"
                 )
                 logPanMetrics("surface-retained")
+                requestFrame("surface-created-retained")
             } else {
                 model = emptyModel(assetName)
                 sortDirty = true
@@ -332,6 +359,7 @@ class SplatRenderer(
                 status("Streaming $streamId${experimentLabel()}...")
                 Log.i(TAG, "surfaceCreatedStartStream photoId=$streamId retainedCount=${retainedModel?.count ?: 0}")
                 startSplatStream(streamId)
+                requestFrame("surface-created-stream")
             }
         } else {
             if (retainedModel != null && retainedModel.count > 0) {
@@ -340,6 +368,7 @@ class SplatRenderer(
                 status("Restored ${retainedModel.assetName}: ${retainedModel.count} splats")
                 Log.i(TAG, "surfaceCreatedRetained asset=$assetName count=${retainedModel.count}")
                 logPanMetrics("surface-retained")
+                requestFrame("surface-created-retained")
             } else {
                 val start = SystemClock.elapsedRealtime()
                 model = PlyLoader.loadAsset(context, assetName)
@@ -348,6 +377,7 @@ class SplatRenderer(
                 sortDirty = true
                 status("Loaded ${m.assetName}: ${m.count} splats, invalid=${m.invalidValueCount}, ${elapsed}ms")
                 logPanMetrics("asset-loaded")
+                requestFrame("surface-created-asset")
             }
         }
     }
@@ -374,6 +404,7 @@ class SplatRenderer(
         createPostFbos(viewportW, viewportH)
         sortDirty = true
         if (model != null) logPanMetrics("surface-changed")
+        requestFrame("surface-changed")
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -1208,12 +1239,14 @@ class SplatRenderer(
             val m = model
             status("Streaming $photoId${experimentLabel()} ${m?.count ?: lastReceived}/${lastExpected.takeIf { it > 0 } ?: "?"}")
             Log.i(TAG, "streamAppend photoId=$photoId appended=$appended loaded=${m?.count ?: 0} expected=$lastExpected invalid=$invalid")
+            requestFrame("stream-append")
         }
         if (streamComplete && !firstStreamFrameLogged) {
             firstStreamFrameLogged = true
             val elapsed = SystemClock.elapsedRealtime() - streamStartMs
             Log.i(TAG, "streamCompleteApplied photoId=$photoId loaded=${model?.count ?: 0} elapsedMs=$elapsed")
             logPanMetrics("stream-complete")
+            requestFrame("stream-complete")
         }
     }
 
@@ -1310,6 +1343,7 @@ class SplatRenderer(
         val countChanged = (model?.count ?: result.count) > result.count
         sortDirty = countChanged ||
             angleDeltaSq(yaw, pitch, lastUploadedSortYaw, lastUploadedSortPitch) > SORT_THRESHOLD_RAD * SORT_THRESHOLD_RAD
+        requestFrame("sort-upload")
     }
 
     private fun maybeScheduleSort(m: SplatModel) {
@@ -1343,6 +1377,7 @@ class SplatRenderer(
                 pendingSort = result
             }
             sortRunning.set(false)
+            requestFrame("sort-complete")
         }
     }
 
@@ -1385,6 +1420,7 @@ class SplatRenderer(
                 status("Cached splat missing for $streamId")
                 streamErrorCallback("cached splat missing")
                 Log.w(TAG, "splatCacheRequiredMiss photoId=$streamId key=$cacheKey networkStreamEnabled=false")
+                requestFrame("stream-error")
                 return@execute
             }
             val localIngestUri = ingestImageUri
@@ -1416,6 +1452,7 @@ class SplatRenderer(
                         Log.i(TAG, "streamCameraHeaderPresent photoId=$streamId ignored existingSource=${sourceCamera?.source}")
                     } else {
                         pendingSourceCamera = headerCamera
+                        requestFrame("stream-camera-header")
                         Log.i(
                             TAG,
                             "streamCameraHeader photoId=$streamId source=${headerCamera.source} " +
@@ -1455,6 +1492,7 @@ class SplatRenderer(
                     Log.e(TAG, "streamFailed photoId=$streamId", exc)
                     status("Stream failed: ${streamError}")
                     streamErrorCallback(streamError ?: "stream failed")
+                    requestFrame("stream-error")
                 }
             } finally {
                 if (!cacheComplete) tmpCacheFile?.delete()
@@ -1519,6 +1557,7 @@ class SplatRenderer(
             streamExpectedCount = expected
             sourceCameraFromHeaders(conn)?.let { headerCamera ->
                 pendingSourceCamera = headerCamera
+                requestFrame("ingest-camera-header")
                 Log.i(
                     TAG,
                     "ingestStreamCameraHeader photoId=$streamId source=${headerCamera.source} " +
@@ -1581,6 +1620,7 @@ class SplatRenderer(
                 Log.e(TAG, "ingestStreamFailed photoId=$streamId", exc)
                 status("Reframe failed: ${streamError}")
                 streamErrorCallback(streamError ?: "reframe failed")
+                requestFrame("ingest-error")
             }
         } finally {
             if (!cacheComplete) tmpCacheFile?.delete()
@@ -1713,6 +1753,7 @@ class SplatRenderer(
                 streamError = exc.message ?: exc.javaClass.simpleName
                 Log.e(TAG, "splatCacheLoadFailed photoId=$streamId key=${entry.key}", exc)
                 status("Cache load failed: ${streamError}")
+                requestFrame("cache-error")
             }
         }
     }
@@ -1777,6 +1818,7 @@ class SplatRenderer(
         synchronized(pendingStreamLock) {
             pendingStreamBatches.add(batch)
         }
+        requestFrame("stream-batch")
     }
 
     private fun parseSplatBatch(
@@ -2290,8 +2332,9 @@ class SplatRenderer(
             return
         }
         releaseCaptureRequested = false
+        val captureGeneration = releaseCaptureGeneration.get()
         if (!captureRunning.compareAndSet(false, true)) {
-            Log.i(TAG, "releaseCaptureSkipped reason=$reason alreadyRunning=true")
+            Log.i(TAG, "releaseCaptureSkipped reason=$reason generation=$captureGeneration alreadyRunning=true")
             return
         }
         val readStartNs = System.nanoTime()
@@ -2322,9 +2365,17 @@ class SplatRenderer(
                 try {
                     val capture = buildReleaseCapture(m, fboPixels, previewPixels, renderW, renderH, captureRect)
                     val buildNs = System.nanoTime() - buildStartNs
+                    if (releaseCaptureGeneration.get() != captureGeneration) {
+                        Log.i(
+                            TAG,
+                            "releaseCaptureDiscarded reason=$reason generation=$captureGeneration " +
+                                "currentGeneration=${releaseCaptureGeneration.get()}"
+                        )
+                        return@execute
+                    }
                     Log.i(
                         TAG,
-                        "releaseCaptureBuilt reason=$reason size=${capture.width}x${capture.height} " +
+                        "releaseCaptureBuilt reason=$reason generation=$captureGeneration size=${capture.width}x${capture.height} " +
                             "render=${capture.renderWidth}x${capture.renderHeight} gap=${capture.gapPx} " +
                             "peripheral=${capture.peripheralPx} timingsMs build=%.1f total=%.1f"
                                 .format(

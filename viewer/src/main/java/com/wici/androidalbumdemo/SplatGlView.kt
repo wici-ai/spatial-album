@@ -16,6 +16,7 @@ class SplatGlView(
     releaseCapture: (ReleaseCapture) -> Unit,
     streamError: (String) -> Unit = {},
     private val interactionStarted: () -> Unit = {},
+    private val interactionStopped: () -> Unit = {},
     private val releaseCaptureEnabled: Boolean = true,
     postPassEnabled: Boolean = true,
     streamDensity: String? = null,
@@ -54,7 +55,8 @@ class SplatGlView(
         ingestEndpointUrl,
         ingestImageUri,
         splatCacheMaxBytes,
-        networkStreamEnabled
+        networkStreamEnabled,
+        requestRenderCallback = { requestRender() }
     )
     private var lastX = 0f
     private var lastY = 0f
@@ -67,7 +69,8 @@ class SplatGlView(
         setEGLContextClientVersion(3)
         setPreserveEGLContextOnPause(true)
         setRenderer(splatRenderer)
-        renderMode = RENDERMODE_CONTINUOUSLY
+        renderMode = RENDERMODE_WHEN_DIRTY
+        requestRender()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -80,8 +83,7 @@ class SplatGlView(
         }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                interactionStarted()
-                queueEvent { splatRenderer.setInteractionActive(true) }
+                beginInteraction(actionName(event.actionMasked))
                 pinching = false
                 lastPinchDistance = 0f
                 lastX = event.x
@@ -89,8 +91,7 @@ class SplatGlView(
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
-                interactionStarted()
-                queueEvent { splatRenderer.setInteractionActive(true) }
+                beginInteraction(actionName(event.actionMasked))
                 if (event.pointerCount >= 2) {
                     pinching = true
                     lastPinchDistance = pinchDistance(event)
@@ -115,10 +116,10 @@ class SplatGlView(
                         val panDominant = centerMove > 0.75f && centerMove >= abs(distanceDelta) * 0.35f
                         if (zoomDominant) {
                             val scale = distance / previous
-                            queueEvent { splatRenderer.dolly(scale) }
+                            queueRenderEvent { splatRenderer.dolly(scale) }
                         }
                         if (panDominant) {
-                            queueEvent { splatRenderer.pan(centerDx, centerDy) }
+                            queueRenderEvent { splatRenderer.pan(centerDx, centerDy) }
                         }
                     }
                     pinching = true
@@ -133,7 +134,7 @@ class SplatGlView(
                 val dy = y - lastY
                 lastX = x
                 lastY = y
-                queueEvent { splatRenderer.orbit(dx, dy) }
+                queueRenderEvent { splatRenderer.orbit(dx, dy) }
                 return true
             }
             MotionEvent.ACTION_UP -> {
@@ -141,12 +142,14 @@ class SplatGlView(
                 lastPinchDistance = 0f
                 val reason = actionName(event.actionMasked)
                 Log.i(TOUCH_TAG, "releaseTrigger reason=$reason enabled=$releaseCaptureEnabled")
-                queueEvent {
+                interactionStopped()
+                queueRenderEvent {
                     splatRenderer.setInteractionActive(false)
                     if (releaseCaptureEnabled) {
                         splatRenderer.requestReleaseCapture(reason)
                     }
                 }
+                setActiveRenderMode(false, reason)
                 return true
             }
             MotionEvent.ACTION_POINTER_UP -> {
@@ -173,7 +176,9 @@ class SplatGlView(
                 lastPinchDistance = 0f
                 lastPinchCenterX = 0f
                 lastPinchCenterY = 0f
-                queueEvent { splatRenderer.setInteractionActive(false) }
+                interactionStopped()
+                queueRenderEvent { splatRenderer.setInteractionActive(false) }
+                setActiveRenderMode(false, actionName(event.actionMasked))
                 Log.i(TOUCH_TAG, "releaseIgnored reason=ACTION_CANCEL")
                 return true
             }
@@ -190,7 +195,12 @@ class SplatGlView(
             if (abs(scroll) > 0.001f) {
                 val step = 1f + abs(scroll) * 0.12f
                 val scale = if (scroll > 0f) step else 1f / step
-                queueEvent { splatRenderer.dolly(scale) }
+                interactionStarted()
+                queueRenderEvent {
+                    splatRenderer.cancelReleaseCapture("ACTION_SCROLL")
+                    splatRenderer.dolly(scale)
+                }
+                interactionStopped()
                 Log.i(TOUCH_TAG, "scrollZoom axis=$scroll scale=$scale")
                 return true
             }
@@ -204,7 +214,34 @@ class SplatGlView(
 
     fun resetView() {
         interactionStarted()
-        queueEvent { splatRenderer.resetView() }
+        queueRenderEvent {
+            splatRenderer.cancelReleaseCapture("reset")
+            splatRenderer.resetView()
+        }
+        interactionStopped()
+    }
+
+    private fun beginInteraction(reason: String) {
+        interactionStarted()
+        setActiveRenderMode(true, reason)
+        queueRenderEvent {
+            splatRenderer.cancelReleaseCapture(reason)
+            splatRenderer.setInteractionActive(true)
+        }
+    }
+
+    private fun queueRenderEvent(block: () -> Unit) {
+        queueEvent(block)
+        requestRender()
+    }
+
+    private fun setActiveRenderMode(active: Boolean, reason: String) {
+        val mode = if (active) RENDERMODE_CONTINUOUSLY else RENDERMODE_WHEN_DIRTY
+        if (renderMode != mode) {
+            renderMode = mode
+            Log.i(TOUCH_TAG, "renderMode=${if (active) "continuous" else "when_dirty"} reason=$reason")
+        }
+        requestRender()
     }
 
     private fun pinchDistance(event: MotionEvent): Float {
