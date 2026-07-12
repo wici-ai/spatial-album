@@ -21,6 +21,61 @@ Basic flow:
 The Android app renders the splat scene on-device with OpenGL ES 3. The backend
 does the heavy model work.
 
+## Private Scene Discovery Demo
+
+On Android 13 and later, the app can discover reconstruction candidates from
+the media the user authorizes. Photos and videos are requested together, while
+access to original location metadata is optional and requested separately.
+Denied, partial, or later-revoked access leaves the app in a recoverable state;
+unknown time, location, or camera direction is kept unknown rather than filled
+with invented values.
+
+Discovery runs on-device. The app reads MediaStore metadata and EXIF evidence,
+extracts bounded JPEG keyframes from videos, computes compact visual and quality
+descriptors, groups likely views of the same scene, and explains default
+exclusions such as low resolution, blur, abnormal exposure, low information, or
+duplicates. Exclusion never deletes the original media. Users can inspect scene
+members, merge scenes, move a member into a new scene, exclude or restore a
+candidate, select an anchor, and undo changes. Corrections are stored as an
+ordered, app-private override log and replayed after a rescan when the media
+identity and fingerprint still match.
+
+No device media is uploaded during permission, scanning, keyframe extraction,
+analysis, grouping, or review. Network-generated previews for local media are
+also disabled without separate explicit consent. Reconstruction has its own
+confirmation screen showing the selected backend, the exact JPEG anchor, and
+how many other members remain local. Consent is bound to the backend, scene,
+and anchor; changing any of them requires confirmation again. A disappearing
+LAN target does not silently authorize a cloud target. WiCi Cloud retains its
+Google sign-in boundary, while discovered or manually configured local backends
+can be selected explicitly.
+
+Important: the current `SharpSingleImageAdapter` submits exactly one confirmed
+photo or cached video keyframe to `/orbit/ingest`. SHARP performs a single-image
+reconstruction; this is **not multi-view fusion**, even when several local media
+items helped discover and review the scene. A future multi-view implementation
+should replace the reconstruction adapter/gateway contract, introduce a real
+multi-file or scene-job backend API, and preserve the same manifest, consent,
+progress, and local-media ownership boundaries.
+
+### Discovery limits and known limitations
+
+The current `local-v1` discovery configuration scans at most 500 images and 100
+videos per pass. Each video is sampled every 2 seconds, with at most 60 samples
+examined and 12 keyframes retained. The keyframe cache is capped at 64 MiB and
+evicts older entries; the validated splat cache is capped at 1 GiB by default.
+Candidate generation keeps at most 24 visual neighbors per item. These limits
+are centralized in `DiscoveryConfig` (and `SplatCache` for splats), so builds or
+tests can inject different values without changing scene rules.
+
+Grouping uses local visual, time, optional distance, and optional camera-heading
+evidence. Missing metadata is tolerated, but visually ambiguous material,
+vendor-specific video decoding, very long libraries beyond the scan budget, and
+scenes with little viewpoint diversity can still require manual correction or
+additional capture. Quality thresholds are heuristics and only affect the
+default selection. The current adapter reconstructs only the chosen anchor, so
+additional reviewed views do not improve SHARP reconstruction geometry yet.
+
 ## Install
 
 Download the latest signed APK from:
@@ -126,8 +181,19 @@ the repository.
 Build a local debug APK:
 
 ```bash
-./gradlew :app:assembleDebug
+./gradlew :viewer:testDebugUnitTest :app:assembleDebug --stacktrace
 ```
+
+The JVM suite covers media identity and missing evidence, keyframe selection and
+cache eviction, local visual similarity and clustering, explainable quality
+filtering, reconstruction suitability, persisted correction replay, consent,
+and typed reconstruction progress. For device validation, install the debug APK
+on an Android 13+ emulator or device, import non-personal test media through
+MediaStore, exercise denied and partial permission states, and verify that no
+`ingest` or `ingest_preview` stage occurs before explicit reconstruction
+confirmation. A real smoke test should then follow `/orbit/ingest` through
+`Preparing`, `Uploading`, `WaitingForInference`, `Streaming`, `CacheCommit`, and
+`Ready`, and open the resulting splat in the existing GLES3 viewer.
 
 The landing page is maintained separately on the `gh-pages` branch.
 
