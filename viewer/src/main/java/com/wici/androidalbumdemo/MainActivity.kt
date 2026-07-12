@@ -54,6 +54,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.wici.androidalbumdemo.scene.LocalPreviewConsent
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -201,7 +202,8 @@ class MainActivity : Activity() {
 
     private fun showAlbum() {
         viewerVisible = false
-        previewEnabled = true
+        // Local media previews are opt-in because generating one uploads media.
+        previewEnabled = false
         glView?.shutdown()
         glView?.onPause()
         glView = null
@@ -261,7 +263,7 @@ class MainActivity : Activity() {
                 stylePreviewToggle(this, previewEnabled)
             }
         }
-        stylePreviewToggle(previewToggle, true)
+        stylePreviewToggle(previewToggle, false)
         albumActionButton = previewToggle
         controlCluster.addView(
             previewToggle,
@@ -819,6 +821,10 @@ class MainActivity : Activity() {
             updateAlbumPhoto(updated)
             val url = loadOrbitPreview(updated) ?: return
             startOrbitPreview(cell, updated, url, previewRequestSerial)
+            return
+        }
+        if (!LocalPreviewConsent.mayRequestNetwork(isLocalMedia = true, explicitConsent = false)) {
+            Log.i(PREVIEW_TAG, "Local preview remains disabled pending explicit upload consent")
             return
         }
         if (!previewBakeInFlight.add(photo.photoId)) {

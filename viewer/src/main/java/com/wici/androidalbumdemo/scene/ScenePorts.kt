@@ -8,8 +8,8 @@ interface VisualAnalyzer {
     fun assessQuality(image: NormalizedImage, config: DiscoveryConfig): QualityAssessment
 }
 interface SceneRepository {
-    suspend fun loadOverrides(): List<SceneOverride>
-    suspend fun saveOverrides(overrides: List<SceneOverride>)
+    suspend fun load(): PersistedSceneState?
+    suspend fun save(state: PersistedSceneState)
 }
 interface ReconstructionGateway { suspend fun submit(manifest: ReconstructionManifest, consent: ConsentGrant): String }
 
