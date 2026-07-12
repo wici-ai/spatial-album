@@ -63,7 +63,9 @@ class SplatRenderer(
     private val networkStreamEnabled: Boolean = true,
     private val reconstructionProgress: (ReconstructionStage) -> Unit = {},
     private val localMediaSource: LocalMediaSource = AndroidLocalMediaSource(context),
+    sceneViewMetadata: SceneViewMetadata? = null,
 ) : GLSurfaceView.Renderer {
+    private val registeredSceneView = sceneViewMetadata?.validated()
     private var model: SplatModel? = null
     private val streamPhotoId = photoId.takeIf { it.isNotBlank() }
     private val requestedStreamDensity = when {
@@ -73,8 +75,9 @@ class SplatRenderer(
     }
     private val renderFootprintScale = footprintScale?.takeIf { it.isFinite() && it > 0f } ?: FOOTPRINT_SCALE
     private val splatCacheMaxBytes = splatCacheMaxBytes?.takeIf { it > 0L } ?: SplatCache.DEFAULT_MAX_BYTES
-    private var sourceCamera =
-        sourceCameraFromExact(sourceWidth, sourceHeight, camFx, camFy, camCx, camCy, "gallery")
+    private var sourceCamera = registeredSceneView?.metadata?.let {
+        SourceCamera(it.imageWidth, it.imageHeight, it.fx, it.fy, it.cx, it.cy, true, "registration:${it.cameraId}")
+    } ?: sourceCameraFromExact(sourceWidth, sourceHeight, camFx, camFy, camCx, camCy, "gallery")
             ?: sourceCameraFromDims(sourceWidth, sourceHeight)
             ?: sourceCameraForAsset(assetName)
     private val view = FloatArray(16)
@@ -456,6 +459,10 @@ class SplatRenderer(
     }
 
     private fun updateView(m: SplatModel) {
+        registeredSceneView?.let {
+            it.worldToCameraColumnMajor.copyInto(view)
+            return
+        }
         if (autoFitActive) {
             updateAutoFitView(m)
             return

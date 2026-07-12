@@ -35,6 +35,7 @@ class SplatGlView(
     networkStreamEnabled: Boolean = true,
     reconstructionProgress: (ReconstructionStage) -> Unit = {},
     localMediaSource: LocalMediaSource = AndroidLocalMediaSource(context.applicationContext),
+    sceneViewMetadata: SceneViewMetadata? = null,
 ) : GLSurfaceView(context) {
     private val splatRenderer = SplatRenderer(
         context.applicationContext,
@@ -60,6 +61,7 @@ class SplatGlView(
         networkStreamEnabled,
         reconstructionProgress,
         localMediaSource,
+        sceneViewMetadata,
     )
     private var lastX = 0f
     private var lastY = 0f
