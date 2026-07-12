@@ -1123,7 +1123,19 @@ class SplatRenderer(
         val receivedCount: Int,
         val expectedCount: Int,
         val complete: Boolean
-    )
+    ) {
+        val accounting: SplatStreamAccounting
+            get() = SplatStreamAccounting(
+                wireRecords = wireCount,
+                renderEligibleRecords = count,
+                alphaFilteredRecords = alphaFilteredCount,
+                invalidRecords = invalidRecordCount
+            )
+
+        var wireCount: Int = count
+        var alphaFilteredCount: Int = 0
+        var invalidRecordCount: Int = 0
+    }
 
     private data class Bounds(
         val minX: Float,
@@ -1757,7 +1769,7 @@ class SplatRenderer(
                 offset += take
                 if (batchByteCount == batchBytes) {
                     val batch = parseSplatBatch(batchBuffer, batchByteCount, receivedRecords + STREAM_BATCH_RECORDS, expected, complete = false, rowBytes = rowBytes, format = format)
-                    receivedRecords += batch.count
+                    receivedRecords += batch.wireCount
                     enqueueStreamBatch(batch)
                     batchByteCount = 0
                 }
@@ -1769,7 +1781,7 @@ class SplatRenderer(
             }
             val records = batchByteCount / rowBytes
             val batch = parseSplatBatch(batchBuffer, batchByteCount, receivedRecords + records, expected, complete = false, rowBytes = rowBytes, format = format)
-            receivedRecords += batch.count
+            receivedRecords += batch.wireCount
             enqueueStreamBatch(batch)
         }
         return receivedRecords
@@ -1810,6 +1822,8 @@ class SplatRenderer(
         val covariances = FloatArray(count * 6)
         val buffer = ByteBuffer.wrap(bytes, 0, byteCount).order(ByteOrder.LITTLE_ENDIAN)
         var invalid = 0
+        var invalidRecords = 0
+        var alphaFiltered = 0
         var out = 0
         for (i in 0 until count) {
             val compact = format == SplatCache.FORMAT_FP16_V1
@@ -1834,6 +1848,9 @@ class SplatRenderer(
                 rawSy = buffer.float
                 rawSz = buffer.float
             }
+            val recordInvalid = !rawX.isFinite() || !rawY.isFinite() || !rawZ.isFinite() ||
+                !rawSx.isFinite() || !rawSy.isFinite() || !rawSz.isFinite()
+            if (recordInvalid) invalidRecords++
             if (!rawX.isFinite()) invalid++
             if (!rawY.isFinite()) invalid++
             if (!rawZ.isFinite()) invalid++
@@ -1855,12 +1872,17 @@ class SplatRenderer(
             val qy = ((buffer.get().toInt() and 0xff) - 128) / 128f
             val qz = ((buffer.get().toInt() and 0xff) - 128) / 128f
 
+            if (recordInvalid) continue
+
             // Match the web GaussianSplats3D splatAlphaRemovalThreshold (=5): drop near-transparent
             // splats. The hand-rolled renderer otherwise floors every alpha to 0.02 and draws even
             // a=0 splats, so the faint peripheral splats accumulate into a low-quality smear under
             // orbit. Dropping them leaves that region empty so it reads as a hole -> peripheral mask
             // -> flux regenerates it cleanly, matching the web.
-            if (a < SPLAT_ALPHA_REMOVAL_THRESHOLD) continue
+            if (a < SPLAT_ALPHA_REMOVAL_THRESHOLD) {
+                alphaFiltered++
+                continue
+            }
 
             val p = out * 3
             centers[p] = x
@@ -1874,7 +1896,7 @@ class SplatRenderer(
             writeCovarianceFromDirectScales(covariances, out * 6, sx, sy, sz, qw, qx, qy, qz)
             out++
         }
-        return if (out == count) {
+        val result = if (out == count) {
             SplatBatch(centers, colors, covariances, count, invalid, receivedCount, expectedCount, complete)
         } else {
             SplatBatch(
@@ -1888,6 +1910,11 @@ class SplatRenderer(
                 complete
             )
         }
+        result.wireCount = count
+        result.alphaFilteredCount = alphaFiltered
+        result.invalidRecordCount = invalidRecords
+        check(result.accounting.countConserved) { "splat count conservation failed: ${result.accounting}" }
+        return result
     }
 
     private fun finiteOr(value: Float, fallback: Float): Float =
