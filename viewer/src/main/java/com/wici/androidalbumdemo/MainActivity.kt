@@ -55,6 +55,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.wici.androidalbumdemo.scene.LocalPreviewConsent
+import com.wici.androidalbumdemo.scene.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -71,6 +72,7 @@ import java.util.concurrent.Executors
 import java.util.zip.GZIPInputStream
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.coroutines.*
 
 class MainActivity : Activity() {
     private var glView: SplatGlView? = null
@@ -105,6 +107,10 @@ class MainActivity : Activity() {
     private var albumAdapter: AlbumGridAdapter? = null
     private var albumStatus: TextView? = null
     private var albumActionButton: TextView? = null
+    private var sceneReviewPanel: SceneReviewPanel? = null
+    private val sceneConfig = DiscoveryConfig()
+    private val sceneController by lazy { SceneReviewController(AtomicJsonSceneRepository(this), "local-v1") }
+    private var sceneSuggestions: List<SceneSuggestion> = emptyList()
     private var galleryRequestSerial = 0
     @Volatile private var devicePhotoScanPartial = false
     private var cascadeRunSerial = 0
@@ -300,6 +306,15 @@ class MainActivity : Activity() {
         header.addView(metaRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         root.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
+        val reviewPanel = SceneReviewPanel(this)
+        sceneReviewPanel = reviewPanel
+        reviewPanel.onEdit = { operation -> runSceneSuspend { sceneController.edit(operation); renderSceneReview() } }
+        reviewPanel.onUndo = { runSceneSuspend { sceneController.undo(); renderSceneReview() } }
+        reviewPanel.render(sceneController.state, emptyMap())
+        root.addView(ScrollView(this).apply { addView(reviewPanel) }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(300)
+        ))
+
         val adapter = AlbumGridAdapter()
         albumAdapter = adapter
         val grid = GridView(this).apply {
@@ -360,6 +375,7 @@ class MainActivity : Activity() {
         } else {
             grid.post { refreshVisibleOrbitPreviews() }
         }
+        startLocalSceneDiscovery()
     }
 
     private fun saveAlbumScrollPosition(reason: String) {
@@ -465,6 +481,89 @@ class MainActivity : Activity() {
             albumAdapter?.setPhotos(importedPhotos)
             albumPhotos = importedPhotos
         }
+        startLocalSceneDiscovery()
+    }
+
+    /** Production orchestration for the device-local scene pipeline. Network code is not reachable here. */
+    private fun startLocalSceneDiscovery() {
+        if (!::renderStatus.isInitialized && sceneReviewPanel == null) return
+        val permission = MediaPermissionState(
+            images = hasPhotoLibraryPermission(),
+            videos = Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED,
+            location = checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED,
+        )
+        sceneController.permission(permission.images, permission.videos)
+        renderSceneReview()
+        if (!permission.images && !permission.videos) return
+        sceneController.scanning()
+        renderSceneReview()
+        val serial = galleryRequestSerial
+        thumbnailExecutor.execute {
+            try {
+                val catalog = AndroidMediaCatalog(contentResolver, sceneConfig)
+                val metadata = AndroidExifMetadataReader(contentResolver) { permission.location }
+                val keyframes = AndroidKeyframeExtractor(contentResolver, KeyframeCache(File(cacheDir, "scene-keyframes"), sceneConfig.keyframeCacheBytes))
+                runSceneSuspend {
+                    val scan = catalog.scan(permission)
+                    val analyzed = mutableListOf<AnalyzedCandidate>()
+                    for (raw in scan.assets) {
+                        if (serial != galleryRequestSerial || Thread.currentThread().isInterrupted) return@runSceneSuspend
+                        val asset = metadata.enrich(raw)
+                        val candidates = if (asset.kind == MediaKind.IMAGE) {
+                            listOf(ImageCandidate("${asset.identity.volumeName}_${asset.identity.mediaId}", asset.identity))
+                        } else keyframes.extract(asset, sceneConfig)
+                        for (candidate in candidates) {
+                            val normalized = decodeSceneCandidate(asset, candidate) ?: continue
+                            val analyzer = LocalVisualAnalyzer()
+                            analyzed += AnalyzedCandidate(candidate, asset, analyzer.describe(normalized), analyzer.assessQuality(normalized, sceneConfig))
+                        }
+                    }
+                    val suggestions = LocalSceneClusterer.suggestions(analyzed, sceneConfig)
+                    val fingerprints = analyzed.map { MediaFingerprint(it.candidate.id, "${it.asset.sizeBytes}:${it.asset.modifiedAtEpochMillis}:${it.candidate.frameTimestampUs}") }
+                    sceneSuggestions = suggestions
+                    sceneController.accept(suggestions, fingerprints)
+                    Log.i("SceneDiscovery", "local scan images=${scan.assets.count { it.kind == MediaKind.IMAGE }} videos=${scan.assets.count { it.kind == MediaKind.VIDEO }} keyframes=${analyzed.count { it.candidate.frameTimestampUs != null }} scenes=${suggestions.size} partial=${scan.partial}")
+                    runOnUiThread { if (serial == galleryRequestSerial && !viewerVisible) renderSceneReview() }
+                }
+            } catch (error: Exception) {
+                Log.w("SceneDiscovery", "local scan failed type=${error.javaClass.simpleName}")
+                sceneController.failed()
+                runOnUiThread { renderSceneReview() }
+            }
+        }
+    }
+
+    private fun decodeSceneCandidate(asset: MediaAsset, candidate: ImageCandidate): NormalizedImage? {
+        val bitmap = if (candidate.frameTimestampUs == null) {
+            asset.contentUri?.let(Uri::parse)?.let { contentResolver.openInputStream(it)?.use(BitmapFactory::decodeStream) }
+        } else {
+            File(cacheDir, "scene-keyframes/${candidate.id.replace(Regex("[^A-Za-z0-9@._-]"), "_")}.jpg")
+                .takeIf(File::isFile)?.inputStream()?.use(BitmapFactory::decodeStream)
+        } ?: return null
+        val scaled = if (bitmap.width > 96 || bitmap.height > 96) Bitmap.createScaledBitmap(bitmap, 96, 96, true) else bitmap
+        if (scaled !== bitmap) bitmap.recycle()
+        return try {
+            val count = scaled.width * scaled.height
+            val pixels = IntArray(count); scaled.getPixels(pixels, 0, scaled.width, 0, 0, scaled.width, scaled.height)
+            val luminance = FloatArray(count); val rgb = FloatArray(count * 3)
+            pixels.forEachIndexed { index, color ->
+                val r = Color.red(color) / 255f; val g = Color.green(color) / 255f; val b = Color.blue(color) / 255f
+                rgb[index * 3] = r; rgb[index * 3 + 1] = g; rgb[index * 3 + 2] = b
+                luminance[index] = .2126f * r + .7152f * g + .0722f * b
+            }
+            NormalizedImage(scaled.width, scaled.height, luminance, rgb)
+        } finally { scaled.recycle() }
+    }
+
+    private fun renderSceneReview() {
+        sceneReviewPanel?.render(sceneController.state, sceneSuggestions.associateBy { it.id })
+    }
+
+    private fun runSceneSuspend(block: suspend () -> Unit) {
+        block.startCoroutine(object : Continuation<Unit> {
+            override val context: CoroutineContext = EmptyCoroutineContext
+            override fun resumeWith(result: Result<Unit>) { result.exceptionOrNull()?.let { Log.w("SceneDiscovery", "operation failed type=${it.javaClass.simpleName}") } }
+        })
     }
 
     private fun addImportedPhotos(uris: List<Uri>) {
