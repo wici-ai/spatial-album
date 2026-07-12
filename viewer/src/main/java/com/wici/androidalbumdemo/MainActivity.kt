@@ -105,6 +105,7 @@ class MainActivity : Activity() {
     private var albumStatus: TextView? = null
     private var albumActionButton: TextView? = null
     private var galleryRequestSerial = 0
+    @Volatile private var devicePhotoScanPartial = false
     private var cascadeRunSerial = 0
     private val previewHandler = Handler(Looper.getMainLooper())
     private val thumbnailCache = mutableMapOf<String, Bitmap>()
@@ -454,8 +455,8 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != REQUEST_READ_PHOTOS) return
-        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+        if (requestCode != REQUEST_READ_MEDIA) return
+        if (permissions.zip(grantResults.toTypedArray()).any { (permission, result) -> permission == photoLibraryPermission() && result == PackageManager.PERMISSION_GRANTED }) {
             loadDeviceAlbum()
         } else {
             albumStatus?.text = "GALLERY UNAVAILABLE"
@@ -496,7 +497,7 @@ class MainActivity : Activity() {
         val requestSerial = ++galleryRequestSerial
         if (!hasPhotoLibraryPermission()) {
             albumStatus?.text = "GALLERY UNAVAILABLE"
-            requestPermissions(arrayOf(photoLibraryPermission()), REQUEST_READ_PHOTOS)
+            requestPermissions(mediaLibraryPermissions(), REQUEST_READ_MEDIA)
             return
         }
         albumStatus?.text = "LOADING GALLERY"
@@ -524,6 +525,7 @@ class MainActivity : Activity() {
     }
 
     private fun queryDevicePhotos(): List<AlbumPhoto> {
+        devicePhotoScanPartial = false
         val photos = mutableListOf<AlbumPhoto>()
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -556,7 +558,11 @@ class MainActivity : Activity() {
             } else {
                 -1
             }
-            while (cursor.moveToNext() && photos.size < DEVICE_PHOTO_LIMIT) {
+            while (cursor.moveToNext()) {
+                if (photos.size >= DEVICE_PHOTO_LIMIT) {
+                    devicePhotoScanPartial = true
+                    continue
+                }
                 val id = cursor.getLong(idCol)
                 val displayName = cursor.getString(nameCol).orEmpty()
                 val mime = cursor.getString(mimeCol).orEmpty()
@@ -3040,7 +3046,7 @@ class MainActivity : Activity() {
         Typeface.create(spaceGroteskBase, weight, false)
 
     private fun momentCountText(): String =
-        "${albumPhotos.size} MOMENTS"
+        "${albumPhotos.size} MOMENTS" + if (devicePhotoScanPartial) " · PARTIAL SCAN (IMAGE 500 / VIDEO 100 BUDGET)" else ""
 
     private fun stylePreviewToggle(view: TextView, enabled: Boolean) {
         view.setTextColor(if (enabled) Color.WHITE else COLOR_INK_SOFT)
@@ -4090,6 +4096,11 @@ class MainActivity : Activity() {
             Manifest.permission.READ_EXTERNAL_STORAGE
         }
 
+    private fun mediaLibraryPermissions(): Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+        } else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+
     private fun hasPhotoLibraryPermission(): Boolean =
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             true
@@ -4336,9 +4347,10 @@ class MainActivity : Activity() {
         private const val PREVIEW_REVEAL_MS = 300L
         private const val PREVIEW_REVEAL_START_SCALE = 0.96f
         private const val REQUEST_PICK_IMAGES = 4201
-        private const val REQUEST_READ_PHOTOS = 4202
+        private const val REQUEST_READ_MEDIA = 4202
         private const val PICK_IMAGES_MAX = 100
-        private const val DEVICE_PHOTO_LIMIT = 600
+        // Interactive gallery budget; scene discovery separately budgets 500 images + 100 videos.
+        private const val DEVICE_PHOTO_LIMIT = 500
         private const val THUMBNAIL_MAX_SIDE = 400
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
         private const val PREVIEW_UPLOAD_MAX_SIDE = 1536

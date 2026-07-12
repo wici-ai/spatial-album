@@ -27,12 +27,19 @@ data class MediaAsset(
     val location: GeoPoint? = null,
     val directionDegrees: Double? = null,
     val durationMillis: Long? = null,
+    val contentUri: String? = null,
+    val sizeBytes: Long? = null,
+    val modifiedAtEpochMillis: Long? = null,
+    val focalLengthMm: Double? = null,
+    val rotationDegrees: Int? = null,
 ) {
     init {
         require(mimeType.isNotBlank())
         require(width >= 0 && height >= 0)
         require(directionDegrees == null || directionDegrees in 0.0..<360.0)
         require(durationMillis == null || durationMillis >= 0)
+        require(sizeBytes == null || sizeBytes >= 0)
+        require(rotationDegrees == null || rotationDegrees in setOf(0, 90, 180, 270))
     }
 }
 
@@ -177,9 +184,61 @@ data class DiscoveryConfig(
     val minimumQualityScore: Double = 0.45,
     val videoSampleIntervalMillis: Long = 2_000L,
     val maximumVideoSamples: Int = 60,
+    val maximumImages: Int = 500,
+    val maximumVideos: Int = 100,
+    val maximumKeyframesPerVideo: Int = 12,
+    val keyframeCacheBytes: Long = 64L * 1024 * 1024,
+    val minimumFrameChange: Double = 0.08,
 ) {
     init {
         require(timeWindowMillis > 0 && distanceThresholdMeters > 0 && directionThresholdDegrees in 0.0..180.0)
         require(minimumQualityScore in 0.0..1.0 && videoSampleIntervalMillis > 0 && maximumVideoSamples > 0)
+        require(maximumImages > 0 && maximumVideos > 0 && maximumKeyframesPerVideo > 0 && keyframeCacheBytes > 0)
+        require(minimumFrameChange in 0.0..1.0)
+    }
+}
+
+data class MediaPermissionState(val images: Boolean, val videos: Boolean, val location: Boolean)
+
+object MediaPermissionPolicy {
+    fun catalogKinds(state: MediaPermissionState): Set<MediaKind> = buildSet {
+        if (state.images) add(MediaKind.IMAGE)
+        if (state.videos) add(MediaKind.VIDEO)
+    }
+    fun mayReadLocation(state: MediaPermissionState): Boolean = state.location
+}
+
+data class ScanResult(val assets: List<MediaAsset>, val imageTotal: Int, val videoTotal: Int) {
+    val partial: Boolean get() = assets.count { it.kind == MediaKind.IMAGE } < imageTotal ||
+        assets.count { it.kind == MediaKind.VIDEO } < videoTotal
+}
+
+data class FrameScore(val timestampUs: Long, val quality: Double, val change: Double)
+
+object KeyframePolicy {
+    fun select(frames: List<FrameScore>, config: DiscoveryConfig): List<FrameScore> = frames
+        .filter { it.quality >= config.minimumQualityScore }
+        .fold(mutableListOf<FrameScore>()) { kept, frame ->
+            if (kept.isEmpty() || frame.change >= config.minimumFrameChange) kept += frame
+            kept
+        }
+        .sortedByDescending { it.quality }
+        .take(config.maximumKeyframesPerVideo)
+        .sortedBy { it.timestampUs }
+}
+
+fun normalizeDirection(degrees: Double): Double = ((degrees % 360.0) + 360.0) % 360.0
+
+class CacheBudget(private val maximumBytes: Long) {
+    private val entries = linkedMapOf<String, Long>()
+    init { require(maximumBytes > 0) }
+    fun record(id: String, bytes: Long): List<String> {
+        require(bytes >= 0)
+        entries.remove(id); entries[id] = bytes
+        val evicted = mutableListOf<String>()
+        while (entries.values.sum() > maximumBytes && entries.isNotEmpty()) {
+            entries.entries.first().also { entries.remove(it.key); evicted += it.key }
+        }
+        return evicted
     }
 }
