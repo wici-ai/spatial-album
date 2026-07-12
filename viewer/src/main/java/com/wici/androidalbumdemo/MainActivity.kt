@@ -111,6 +111,7 @@ class MainActivity : Activity() {
     private val sceneConfig = DiscoveryConfig()
     private val sceneController by lazy { SceneReviewController(AtomicJsonSceneRepository(this), "local-v1") }
     private var sceneSuggestions: List<SceneSuggestion> = emptyList()
+    private val sceneCandidateUris = ConcurrentHashMap<String, Uri>()
     private var galleryRequestSerial = 0
     @Volatile private var devicePhotoScanPartial = false
     private var cascadeRunSerial = 0
@@ -310,6 +311,7 @@ class MainActivity : Activity() {
         sceneReviewPanel = reviewPanel
         reviewPanel.onEdit = { operation -> runSceneSuspend { sceneController.edit(operation); renderSceneReview() } }
         reviewPanel.onUndo = { runSceneSuspend { sceneController.undo(); renderSceneReview() } }
+        reviewPanel.onReconstruct = { scene -> showSceneReconstructionConfirmation(scene) }
         reviewPanel.render(sceneController.state, emptyMap())
         root.addView(ScrollView(this).apply { addView(reviewPanel) }, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(300)
@@ -514,6 +516,12 @@ class MainActivity : Activity() {
                         } else keyframes.extract(asset, sceneConfig)
                         for (candidate in candidates) {
                             val normalized = decodeSceneCandidate(asset, candidate) ?: continue
+                            val candidateUri = if (candidate.frameTimestampUs == null) {
+                                asset.contentUri?.let(Uri::parse)
+                            } else {
+                                Uri.fromFile(File(cacheDir, "scene-keyframes/${candidate.id.replace(Regex("[^A-Za-z0-9@._-]"), "_")}.jpg"))
+                            }
+                            candidateUri?.let { sceneCandidateUris[candidate.id] = it }
                             val analyzer = LocalVisualAnalyzer()
                             analyzed += AnalyzedCandidate(candidate, asset, analyzer.describe(normalized), analyzer.assessQuality(normalized, sceneConfig))
                         }
@@ -557,6 +565,56 @@ class MainActivity : Activity() {
 
     private fun renderSceneReview() {
         sceneReviewPanel?.render(sceneController.state, sceneSuggestions.associateBy { it.id })
+    }
+
+    private fun showSceneReconstructionConfirmation(scene: ReviewedScene) {
+        val suggestion = sceneSuggestions.firstOrNull { it.id == scene.id }
+        val manifest = runCatching { ReconstructionManifest.from(scene, suggestion) }.getOrElse {
+            Toast.makeText(this, "Select a non-excluded anchor first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val anchorUri = sceneCandidateUris[manifest.anchorCandidateId] ?: run {
+            Toast.makeText(this, "Anchor is no longer available; rescan", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val base = backendBaseUrl()
+        val kind = when {
+            manualBackendBaseUrl() != null -> ReconstructionTargetKind.MANUAL
+            discoveredBackendBaseUrl != null -> ReconstructionTargetKind.LAN
+            else -> ReconstructionTargetKind.CLOUD
+        }
+        val target = ConfirmedTarget("${kind.name}:$base", backendSourceLabel(), kind, "$base/orbit/ingest")
+        val confirmation = ReconstructionConfirmation(target, manifest, "image/jpeg", manifest.selectedCandidateIds.size - 1)
+        val policy = TargetBoundConsentPolicy()
+        val confirmationView = ReconstructionConfirmationView(this)
+        confirmationView.bind(confirmation, decodeAnchorThumbnail(anchorUri)) {
+            val session = ReconstructionSession(policy) { anchorId, confirmedTarget, onStage ->
+                Log.i("Reconstruction", "confirmed anchor=${anchorId.hashCode().toUInt()} target=${confirmedTarget.kind}")
+                showReviewedAnchorViewer(anchorId, anchorUri, confirmedTarget, onStage)
+                object : ReconstructionRequest { override fun cancel() { glView?.shutdown() } }
+            }
+            check(session.submit(confirmation, policy.authorize(confirmation)))
+        }
+        applyFullscreen(ScrollView(this).apply { addView(confirmationView) })
+        setContentView(confirmationView.parent as View)
+    }
+
+    private fun decodeAnchorThumbnail(uri: Uri): Bitmap? = runCatching {
+        AndroidLocalMediaSource(this).open(uri).use { BitmapFactory.decodeStream(it) }
+    }.getOrNull()
+
+    private fun showReviewedAnchorViewer(
+        anchorId: String,
+        uri: Uri,
+        target: ConfirmedTarget,
+        onStage: (ReconstructionStage) -> Unit,
+    ) {
+        val photo = AlbumPhoto(
+            photoId = "scene-${anchorId.hashCode().toUInt()}", thumbnailUrl = uri.toString(), hasOrbit = false,
+            hasSplat = false, sourceWidth = null, sourceHeight = null, camFx = null, camFy = null,
+            camCx = null, camCy = null, localUri = uri, imported = true,
+        )
+        showViewer(photo, target.endpoint, onStage)
     }
 
     private fun runSceneSuspend(block: suspend () -> Unit) {
@@ -2153,7 +2211,11 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun showViewer(photo: AlbumPhoto) {
+    private fun showViewer(
+        photo: AlbumPhoto,
+        ingestEndpointOverride: String? = null,
+        reconstructionProgress: (ReconstructionStage) -> Unit = {},
+    ) {
         if (!photo.hasSplat) {
             if (photo.localUri != null) beginReframing(photo) else showStaticPhoto(photo)
             return
@@ -2225,10 +2287,14 @@ class MainActivity : Activity() {
             photo.camCy,
             photo.splatStreamUrl,
             "$viewerGalleryUrl/splat_stream",
-            "$viewerGalleryUrl/ingest",
+            ingestEndpointOverride ?: "$viewerGalleryUrl/ingest",
             photo.localUri?.takeIf { photo.imported }?.toString(),
             splatCacheMaxBytesOverride,
-            networkStreamEnabled = !photo.imported || photo.localUri != null
+            networkStreamEnabled = !photo.imported || photo.localUri != null,
+            reconstructionProgress = { stage ->
+                reconstructionProgress(stage)
+                Log.i("Reconstruction", "stage=${stage.javaClass.simpleName}")
+            },
         )
         glView = viewer
 

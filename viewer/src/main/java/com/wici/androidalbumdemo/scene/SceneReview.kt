@@ -158,6 +158,7 @@ fun privacySafeIdentity(identity: MediaIdentity): String {
 class SceneReviewPanel(context: Context) : LinearLayout(context) {
     var onEdit: ((SceneOverride) -> Unit)? = null
     var onUndo: (() -> Unit)? = null
+    var onReconstruct: ((ReviewedScene) -> Unit)? = null
 
     init { orientation = VERTICAL; setPadding(24, 24, 24, 24) }
 
@@ -205,6 +206,11 @@ class SceneReviewPanel(context: Context) : LinearLayout(context) {
             if (other != null) card.addView(Button(context).apply {
                 text = "Merge with ${other.id.takeLast(8)}"
                 setOnClickListener { onEdit?.invoke(SceneOverride.Merge(scene.id, other.id)) }
+            })
+            card.addView(Button(context).apply {
+                text = "Review reconstruction upload"
+                isEnabled = scene.anchorCandidateId != null && scene.anchorCandidateId !in scene.excludedCandidateIds
+                setOnClickListener { onReconstruct?.invoke(scene) }
             })
             addView(card, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
         }
