@@ -1,5 +1,8 @@
 package com.wici.androidalbumdemo
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.MessageDigest
 import kotlin.math.abs
 
 /** Registration-owned camera contract for a multi-view scene artifact. */
@@ -60,7 +63,12 @@ data class SceneViewMetadata(
             -(pose[2] * tx + pose[6] * ty + pose[10] * tz),
             1f,
         )
-        return ValidatedSceneView(this, view)
+        return ValidatedSceneView(
+            metadata = this,
+            worldToCameraColumnMajor = view,
+            poseSha256 = sha256Floats(pose),
+            intrinsicsSha256 = sha256Intrinsics(imageWidth, imageHeight, fx, fy, cx, cy),
+        )
     }
 
     companion object {
@@ -68,10 +76,37 @@ data class SceneViewMetadata(
         const val SOURCE = "registration"
         const val POSE_ENCODING = "nerfstudio-opengl-c2w-row-major-3x4"
         private const val RIGID_EPSILON = 1e-3f
+
+        private fun sha256Floats(values: FloatArray): String {
+            val bytes = ByteBuffer.allocate(values.size * 4).order(ByteOrder.BIG_ENDIAN)
+            values.forEach { bytes.putInt(it.toRawBits()) }
+            return MessageDigest.getInstance("SHA-256").digest(bytes.array()).toHex()
+        }
+
+        private fun sha256Intrinsics(
+            width: Int,
+            height: Int,
+            fx: Float,
+            fy: Float,
+            cx: Float,
+            cy: Float,
+        ): String {
+            // Canonical scene-view-v1 representation: big-endian i32 dimensions followed by
+            // the raw IEEE-754 bits for fx, fy, cx and cy.
+            val bytes = ByteBuffer.allocate(24).order(ByteOrder.BIG_ENDIAN)
+                .putInt(width).putInt(height)
+                .putInt(fx.toRawBits()).putInt(fy.toRawBits())
+                .putInt(cx.toRawBits()).putInt(cy.toRawBits())
+            return MessageDigest.getInstance("SHA-256").digest(bytes.array()).toHex()
+        }
+
+        private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 }
 
 class ValidatedSceneView internal constructor(
     val metadata: SceneViewMetadata,
     val worldToCameraColumnMajor: FloatArray,
+    val poseSha256: String,
+    val intrinsicsSha256: String,
 )

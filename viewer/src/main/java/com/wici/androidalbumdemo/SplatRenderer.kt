@@ -366,6 +366,15 @@ class SplatRenderer(
         val camera = sourceCamera
         if (camera != null && !autoFitActive) {
             setSourceProjection(camera)
+            registeredSceneView?.let { registered ->
+                Log.i(
+                    TAG,
+                    "registrationCamera version=${registered.metadata.version} " +
+                        "source=${registered.metadata.source} cameraId=${registered.metadata.cameraId} " +
+                        "poseSha256=${registered.poseSha256} " +
+                        "intrinsicsSha256=${registered.intrinsicsSha256}"
+                )
+            }
             Log.i(
                 TAG,
                 "sourceCamera asset=$assetName fx=${camera.fx} fy=${camera.fy} " +

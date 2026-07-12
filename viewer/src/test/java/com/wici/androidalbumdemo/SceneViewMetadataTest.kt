@@ -38,6 +38,8 @@ class SceneViewMetadataTest {
         )
         assertArrayEquals(expected, result.worldToCameraColumnMajor, 1e-5f)
         assertEquals("frame_00017", result.metadata.cameraId)
+        assertEquals("8e269d6f202b664aa9b0325a78bf881b345724560c8021d184a99d6a8f123c09", result.poseSha256)
+        assertEquals("8d16049b0ac01555ce1779e2db4dbdbae3ac4eeaf7095b7fd35d7e4b6bbaed50", result.intrinsicsSha256)
     }
 
     @Test fun `unknown version and non-registration source fail closed`() {
