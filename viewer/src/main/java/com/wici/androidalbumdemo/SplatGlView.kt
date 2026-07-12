@@ -7,6 +7,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import kotlin.math.abs
 import kotlin.math.sqrt
+import com.wici.androidalbumdemo.scene.ReconstructionStage
 
 class SplatGlView(
     context: Context,
@@ -31,7 +32,9 @@ class SplatGlView(
     ingestEndpointUrl: String? = null,
     ingestImageUri: String? = null,
     splatCacheMaxBytes: Long? = null,
-    networkStreamEnabled: Boolean = true
+    networkStreamEnabled: Boolean = true,
+    reconstructionProgress: (ReconstructionStage) -> Unit = {},
+    localMediaSource: LocalMediaSource = AndroidLocalMediaSource(context.applicationContext),
 ) : GLSurfaceView(context) {
     private val splatRenderer = SplatRenderer(
         context.applicationContext,
@@ -54,7 +57,9 @@ class SplatGlView(
         ingestEndpointUrl,
         ingestImageUri,
         splatCacheMaxBytes,
-        networkStreamEnabled
+        networkStreamEnabled,
+        reconstructionProgress,
+        localMediaSource,
     )
     private var lastX = 0f
     private var lastY = 0f

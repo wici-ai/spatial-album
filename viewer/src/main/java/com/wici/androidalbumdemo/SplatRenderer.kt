@@ -37,6 +37,7 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
+import com.wici.androidalbumdemo.scene.ReconstructionStage
 
 class SplatRenderer(
     private val context: Context,
@@ -59,7 +60,9 @@ class SplatRenderer(
     private val ingestEndpointUrl: String? = null,
     private val ingestImageUri: String? = null,
     splatCacheMaxBytes: Long? = null,
-    private val networkStreamEnabled: Boolean = true
+    private val networkStreamEnabled: Boolean = true,
+    private val reconstructionProgress: (ReconstructionStage) -> Unit = {},
+    private val localMediaSource: LocalMediaSource = AndroidLocalMediaSource(context),
 ) : GLSurfaceView.Renderer {
     private var model: SplatModel? = null
     private val streamPhotoId = photoId.takeIf { it.isNotBlank() }
@@ -277,6 +280,7 @@ class SplatRenderer(
 
     fun shutdown() {
         streamCancelled.set(true)
+        reconstructionProgress(ReconstructionStage.Cancelled)
         streamConnection?.disconnect()
         synchronized(pendingStreamLock) {
             pendingStreamBatches.clear()
@@ -1474,6 +1478,7 @@ class SplatRenderer(
         var responseWaitMs = -1L
         var downloadMs = -1L
         try {
+            reconstructionProgress(ReconstructionStage.Preparing)
             val upload = buildIngestUploadPayload(streamId, imageUriString)
             uploadBytes = upload.bytes.size.toLong()
             val boundary = "----WiciAndroidRenderer${SystemClock.elapsedRealtimeNanos()}"
@@ -1489,6 +1494,7 @@ class SplatRenderer(
             }
             streamConnection = conn
             conn.outputStream.use { out ->
+                reconstructionProgress(ReconstructionStage.Uploading(uploadBytes))
                 writeMultipartText(out, boundary, "photoId", streamId)
                 writeMultipartText(out, boundary, "title", streamId)
                 out.writeUtf8("--$boundary\r\n")
@@ -1498,6 +1504,7 @@ class SplatRenderer(
                 out.writeUtf8("\r\n--$boundary--\r\n")
             }
             val waitStart = SystemClock.elapsedRealtime()
+            reconstructionProgress(ReconstructionStage.WaitingForInference)
             val code = conn.responseCode
             responseWaitMs = SystemClock.elapsedRealtime() - waitStart
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
@@ -1556,6 +1563,7 @@ class SplatRenderer(
             }
             downloadMs = SystemClock.elapsedRealtime() - downloadStart
             if (!streamCancelled.get()) {
+                reconstructionProgress(ReconstructionStage.Streaming(receivedRecords, tmp.length()))
                 enqueueStreamBatch(SplatBatch(FloatArray(0), FloatArray(0), FloatArray(0), 0, 0, receivedRecords, expected.takeIf { it > 0 } ?: receivedRecords, complete = true))
                 val elapsed = SystemClock.elapsedRealtime() - started
                 status("Streamed $streamId${experimentLabel()} $receivedRecords/${expected.takeIf { it > 0 } ?: "?"} in ${elapsed}ms")
@@ -1566,8 +1574,12 @@ class SplatRenderer(
                         "fp32Bytes=$fp32Bytes uploadBytes=$uploadBytes responseWaitMs=$responseWaitMs " +
                         "downloadMs=$downloadMs elapsedMs=$elapsed"
                 )
+                val inspected = requireNotNull(SplatCache.inspect(tmp, SPLAT_ROW_BYTES)) { "invalid splat payload" }
+                reconstructionProgress(ReconstructionStage.CacheCommit(inspected.records, inspected.bytes))
                 val store = SplatCache.commit(context, cacheKey, tmp, splatCacheMaxBytes)
                 cacheComplete = store.stored
+                require(store.stored) { "splat cache commit failed: ${store.reason ?: "unknown"}" }
+                reconstructionProgress(ReconstructionStage.Ready(inspected.records, inspected.bytes))
                 Log.i(
                     TAG,
                     "splatCacheStored photoId=$streamId key=$cacheKey stored=${store.stored} " +
@@ -1578,6 +1590,7 @@ class SplatRenderer(
         } catch (exc: Exception) {
             if (!streamCancelled.get()) {
                 streamError = exc.message ?: exc.javaClass.simpleName
+                reconstructionProgress(ReconstructionStage.Failed(streamError ?: "reconstruction failed"))
                 Log.e(TAG, "ingestStreamFailed photoId=$streamId", exc)
                 status("Reframe failed: ${streamError}")
                 streamErrorCallback(streamError ?: "reframe failed")
@@ -1597,10 +1610,14 @@ class SplatRenderer(
 
     private fun buildIngestUploadPayload(streamId: String, imageUriString: String): IngestUploadPayload {
         val imageUri = Uri.parse(imageUriString)
-        val sourceMime = context.contentResolver.getType(imageUri) ?: "image/jpeg"
+        val sourceMime = localMediaSource.mimeType(imageUri) ?: "image/jpeg"
         var bitmap: Bitmap? = null
         try {
-            val source = ImageDecoder.createSource(context.contentResolver, imageUri)
+            val source = if (imageUri.scheme == "file") {
+                ImageDecoder.createSource(File(requireNotNull(imageUri.path)))
+            } else {
+                ImageDecoder.createSource(context.contentResolver, imageUri)
+            }
             bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 decoder.isMutableRequired = false
@@ -1632,8 +1649,7 @@ class SplatRenderer(
                 "ingestStreamUploadDownscaleFailed photoId=$streamId; falling back to raw upload: ${exc.message}",
                 exc
             )
-            val payload = context.contentResolver.openInputStream(imageUri).use { input ->
-                requireNotNull(input) { "openInputStream returned null" }
+            val payload = localMediaSource.open(imageUri).use { input ->
                 input.readBytes()
             }
             return IngestUploadPayload(

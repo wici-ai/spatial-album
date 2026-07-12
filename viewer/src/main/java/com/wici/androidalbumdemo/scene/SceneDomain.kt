@@ -155,14 +155,19 @@ class ReconstructionManifest private constructor(
     val sceneId: String,
     val selectedCandidateIds: Set<String>,
     val excludedCandidateIds: Set<String>,
+    val exclusionReasons: Map<String, Set<String>>,
     val anchorCandidateId: String,
 ) {
     companion object {
-        fun from(scene: ReviewedScene): ReconstructionManifest {
+        fun from(scene: ReviewedScene, suggestion: SceneSuggestion? = null): ReconstructionManifest {
             val selected = scene.candidateIds - scene.excludedCandidateIds
             val anchor = requireNotNull(scene.anchorCandidateId) { "An anchor is required" }
             require(anchor in selected) { "Anchor must be a selected, non-excluded candidate" }
-            return ReconstructionManifest(scene.id, selected, scene.excludedCandidateIds, anchor)
+            val reasons = scene.excludedCandidateIds.associateWith { candidateId ->
+                suggestion?.quality?.get(candidateId)?.exclusionReasons?.map { it.name }?.toSet().orEmpty()
+                    .ifEmpty { setOf("USER_EXCLUDED") }
+            }
+            return ReconstructionManifest(scene.id, selected, scene.excludedCandidateIds, reasons, anchor)
         }
     }
 }
