@@ -167,11 +167,19 @@ class ReconstructionManifest private constructor(
     }
 }
 
-data class NormalizedImage(val width: Int, val height: Int, val luminance: FloatArray) {
+data class NormalizedImage(
+    val width: Int,
+    val height: Int,
+    val luminance: FloatArray,
+    /** Optional interleaved RGB. Luminance-only decoders remain supported. */
+    val rgb: FloatArray? = null,
+) {
     init {
         require(width > 0 && height > 0)
         require(luminance.size == width * height)
         require(luminance.all { it in 0f..1f })
+        require(rgb == null || rgb.size == width * height * 3)
+        require(rgb == null || rgb.all { it in 0f..1f })
     }
 }
 
@@ -189,12 +197,24 @@ data class DiscoveryConfig(
     val maximumKeyframesPerVideo: Int = 12,
     val keyframeCacheBytes: Long = 64L * 1024 * 1024,
     val minimumFrameChange: Double = 0.08,
+    val minimumDimensionPixels: Int = 480,
+    val blurThreshold: Double = 0.025,
+    val exposureFractionThreshold: Double = 0.65,
+    val informationThreshold: Double = 0.12,
+    val strongVisualSimilarity: Double = 0.82,
+    val clusterSimilarity: Double = 0.70,
+    val duplicateSimilarity: Double = 0.96,
+    val maximumCandidateNeighbors: Int = 24,
 ) {
     init {
         require(timeWindowMillis > 0 && distanceThresholdMeters > 0 && directionThresholdDegrees in 0.0..180.0)
         require(minimumQualityScore in 0.0..1.0 && videoSampleIntervalMillis > 0 && maximumVideoSamples > 0)
         require(maximumImages > 0 && maximumVideos > 0 && maximumKeyframesPerVideo > 0 && keyframeCacheBytes > 0)
         require(minimumFrameChange in 0.0..1.0)
+        require(minimumDimensionPixels > 0 && blurThreshold in 0.0..1.0)
+        require(exposureFractionThreshold in 0.0..1.0 && informationThreshold in 0.0..1.0)
+        require(strongVisualSimilarity in 0.0..1.0 && clusterSimilarity in 0.0..1.0)
+        require(duplicateSimilarity in 0.0..1.0 && maximumCandidateNeighbors > 0)
     }
 }
 
