@@ -101,6 +101,7 @@ class MainActivity : Activity() {
     private var footprintScaleOverride: Float? = null
     private var splatCacheMaxBytesOverride: Long? = null
     private var viewerVisible = false
+    private var sceneViewMetadataOverride: SceneViewMetadata? = null
     private var previewRequestSerial = 0
     private var previewEnabled = false
     private var albumGrid: GridView? = null
@@ -162,6 +163,7 @@ class MainActivity : Activity() {
     }
 
     private fun applyIntentOverrides(intent: Intent) {
+        sceneViewMetadataOverride = sceneViewMetadataFromIntent(intent)
         releaseCaptureEnabled = !intent.getBooleanExtra("disableReleaseCapture", false)
         postPassEnabled = !intent.getBooleanExtra("disablePostPass", false)
         streamDensityOverride = intent.getStringExtra("streamDensity")
@@ -2295,6 +2297,7 @@ class MainActivity : Activity() {
                 reconstructionProgress(stage)
                 Log.i("Reconstruction", "stage=${stage.javaClass.simpleName}")
             },
+            sceneViewMetadata = sceneViewMetadataOverride,
         )
         glView = viewer
 
@@ -4266,6 +4269,26 @@ class MainActivity : Activity() {
         } else {
             Manifest.permission.READ_EXTERNAL_STORAGE
         }
+
+    /** Explicit transport for registration-owned multi-view camera metadata. */
+    private fun sceneViewMetadataFromIntent(intent: Intent): SceneViewMetadata? {
+        if (!intent.hasExtra("sceneViewVersion")) return null
+        val pose = intent.getFloatArrayExtra("sceneViewPose")
+            ?: throw IllegalArgumentException("sceneViewPose is required")
+        return SceneViewMetadata(
+            version = intent.getStringExtra("sceneViewVersion").orEmpty(),
+            source = intent.getStringExtra("sceneViewSource").orEmpty(),
+            cameraId = intent.getStringExtra("sceneViewCameraId").orEmpty(),
+            imageWidth = intent.getIntExtra("sceneViewImageWidth", 0),
+            imageHeight = intent.getIntExtra("sceneViewImageHeight", 0),
+            fx = intent.getFloatExtra("sceneViewFx", Float.NaN),
+            fy = intent.getFloatExtra("sceneViewFy", Float.NaN),
+            cx = intent.getFloatExtra("sceneViewCx", Float.NaN),
+            cy = intent.getFloatExtra("sceneViewCy", Float.NaN),
+            poseEncoding = intent.getStringExtra("sceneViewPoseEncoding").orEmpty(),
+            pose = pose,
+        ).also { it.validated() }
+    }
 
     private fun mediaLibraryPermissions(): Array<String> =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
