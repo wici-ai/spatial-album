@@ -1857,12 +1857,13 @@ class SplatRenderer(
                 rawSy = Half.toFloat(buffer.short)
                 rawSz = Half.toFloat(buffer.short)
             } else {
-                rawX = buffer.float
-                rawY = buffer.float
-                rawZ = buffer.float
-                rawSx = buffer.float
-                rawSy = buffer.float
-                rawSz = buffer.float
+                val row = SplatWireDecoder.decodeRow(bytes, i * rowBytes)
+                rawX = row.x
+                rawY = row.y
+                rawZ = row.z
+                rawSx = row.sx
+                rawSy = row.sy
+                rawSz = row.sz
             }
             val recordInvalid = !rawX.isFinite() || !rawY.isFinite() || !rawZ.isFinite() ||
                 !rawSx.isFinite() || !rawSy.isFinite() || !rawSz.isFinite()
@@ -1879,14 +1880,15 @@ class SplatRenderer(
             val sx = finiteOr(rawSx, DEFAULT_DIRECT_SCALE).coerceAtLeast(MIN_DIRECT_SCALE)
             val sy = finiteOr(rawSy, DEFAULT_DIRECT_SCALE).coerceAtLeast(MIN_DIRECT_SCALE)
             val sz = finiteOr(rawSz, DEFAULT_DIRECT_SCALE).coerceAtLeast(MIN_DIRECT_SCALE)
-            val r = buffer.get().toInt() and 0xff
-            val g = buffer.get().toInt() and 0xff
-            val b = buffer.get().toInt() and 0xff
-            val a = buffer.get().toInt() and 0xff
-            val qw = ((buffer.get().toInt() and 0xff) - 128) / 128f
-            val qx = ((buffer.get().toInt() and 0xff) - 128) / 128f
-            val qy = ((buffer.get().toInt() and 0xff) - 128) / 128f
-            val qz = ((buffer.get().toInt() and 0xff) - 128) / 128f
+            val wireRow = if (compact) null else SplatWireDecoder.decodeRow(bytes, i * rowBytes)
+            val r = wireRow?.r ?: (buffer.get().toInt() and 0xff)
+            val g = wireRow?.g ?: (buffer.get().toInt() and 0xff)
+            val b = wireRow?.b ?: (buffer.get().toInt() and 0xff)
+            val a = wireRow?.a ?: (buffer.get().toInt() and 0xff)
+            val qw = wireRow?.qw ?: (((buffer.get().toInt() and 0xff) - 128) / 128f)
+            val qx = wireRow?.qx ?: (((buffer.get().toInt() and 0xff) - 128) / 128f)
+            val qy = wireRow?.qy ?: (((buffer.get().toInt() and 0xff) - 128) / 128f)
+            val qz = wireRow?.qz ?: (((buffer.get().toInt() and 0xff) - 128) / 128f)
 
             if (recordInvalid) continue
 
