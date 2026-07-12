@@ -996,21 +996,21 @@ class SplatRenderer(
         GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 2 * 4, 0)
 
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instanceVbo)
-        val stride = INSTANCE_FLOATS * 4
+        val stride = SplatInstance.BYTES
         GLES30.glEnableVertexAttribArray(1)
-        GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, stride, 0)
+        GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, stride, SplatInstance.CENTER_OFFSET_BYTES)
         GLES30.glVertexAttribDivisor(1, 1)
         GLES30.glEnableVertexAttribArray(2)
-        GLES30.glVertexAttribPointer(2, 4, GLES30.GL_FLOAT, false, stride, 3 * 4)
+        GLES30.glVertexAttribPointer(2, 4, GLES30.GL_FLOAT, false, stride, SplatInstance.COLOR_OFFSET_BYTES)
         GLES30.glVertexAttribDivisor(2, 1)
         GLES30.glEnableVertexAttribArray(3)
-        GLES30.glVertexAttribPointer(3, 2, GLES30.GL_FLOAT, false, stride, 7 * 4)
+        GLES30.glVertexAttribPointer(3, 2, GLES30.GL_FLOAT, false, stride, SplatInstance.AXIS0_OFFSET_BYTES)
         GLES30.glVertexAttribDivisor(3, 1)
         GLES30.glEnableVertexAttribArray(4)
-        GLES30.glVertexAttribPointer(4, 2, GLES30.GL_FLOAT, false, stride, 9 * 4)
+        GLES30.glVertexAttribPointer(4, 2, GLES30.GL_FLOAT, false, stride, SplatInstance.AXIS1_OFFSET_BYTES)
         GLES30.glVertexAttribDivisor(4, 1)
         GLES30.glEnableVertexAttribArray(5)
-        GLES30.glVertexAttribPointer(5, 3, GLES30.GL_FLOAT, false, stride, 11 * 4)
+        GLES30.glVertexAttribPointer(5, 3, GLES30.GL_FLOAT, false, stride, SplatInstance.CONIC_OFFSET_BYTES)
         GLES30.glVertexAttribDivisor(5, 1)
         GLES30.glBindVertexArray(0)
     }
@@ -2034,12 +2034,13 @@ class SplatRenderer(
         } else {
             GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, byteCount, buffer)
         }
-        uploadedInstanceCount = byteCount / (INSTANCE_FLOATS * 4)
+        require(byteCount % SplatInstance.BYTES == 0) { "Partial splat instance: $byteCount bytes" }
+        uploadedInstanceCount = byteCount / SplatInstance.BYTES
     }
 
     private fun reusableInstanceBuildBuffer(byteCount: Int): ByteBuffer {
         val expectedCount = streamExpectedCount.takeIf { it > 0 } ?: model?.count ?: 0
-        val targetBytes = max(byteCount, expectedCount * INSTANCE_FLOATS * 4)
+        val targetBytes = max(byteCount, expectedCount * SplatInstance.BYTES)
         synchronized(instanceBuildBufferLock) {
             val existing = instanceBuildBuffer
             if (existing == null || instanceBuildBufferCapacityBytes < targetBytes) {
@@ -2060,7 +2061,7 @@ class SplatRenderer(
         }
         quickSort(order, depth, 0, m.count - 1)
 
-        val byteCount = m.count * INSTANCE_FLOATS * 4
+        val byteCount = m.count * SplatInstance.BYTES
         val buffer = reusableInstanceBuildBuffer(byteCount)
         buffer.clear()
         val fx = proj[0] * viewportW * 0.5f
@@ -2089,20 +2090,7 @@ class SplatRenderer(
             val ty = sortView[1] * cx + sortView[5] * cy + sortView[9] * cz + sortView[13]
             val tz = sortView[2] * cx + sortView[6] * cy + sortView[10] * cz + sortView[14]
             projectEllipse(ellipseScratch, m, cov, tx, ty, tz, fx, fy, footprintScale, vr00, vr01, vr02, vr10, vr11, vr12, vr20, vr21, vr22)
-            buffer.putFloat(m.centers[p])
-            buffer.putFloat(m.centers[p + 1])
-            buffer.putFloat(m.centers[p + 2])
-            buffer.putFloat(m.colors[c])
-            buffer.putFloat(m.colors[c + 1])
-            buffer.putFloat(m.colors[c + 2])
-            buffer.putFloat(m.colors[c + 3])
-            buffer.putFloat(ellipseScratch[0])
-            buffer.putFloat(ellipseScratch[1])
-            buffer.putFloat(ellipseScratch[2])
-            buffer.putFloat(ellipseScratch[3])
-            buffer.putFloat(ellipseScratch[4])
-            buffer.putFloat(ellipseScratch[5])
-            buffer.putFloat(ellipseScratch[6])
+            SplatInstance.write(buffer, m.centers, p, m.colors, c, ellipseScratch)
         }
         buffer.flip()
         return SortResult(buffer, byteCount, m.count, sortYaw, sortPitch)
