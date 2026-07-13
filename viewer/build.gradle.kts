@@ -24,6 +24,7 @@ kotlin {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     // Native "Sign in with Google" via Credential Manager. SupabaseAuth exchanges the
     // Google ID token with Supabase using the app's existing HttpURLConnection style.
     implementation("androidx.credentials:credentials:1.3.0")
