@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.hypot
 
-/** Standalone remote surface. MainActivity integration is intentionally deferred to S8. */
+/** Session-owning remote interactive surface used by MainActivity. */
 class RemoteRenderView(
     context: Context,
     private val client: RemoteRenderClient,

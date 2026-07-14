@@ -132,13 +132,36 @@ http://192.168.1.50:54228
 
 Local backends do not require Google sign-in.
 
+### Renderer Modes
+
+The Server settings also persist a renderer choice:
+
+- **Automatic** (default) uses remote interaction only when Orbit health
+  advertises the exact `remote-render-v1` capability. Older or offline
+  backends continue through the local GLES3 path. A failed remote session is
+  recreated at most once before the app releases it and falls back locally.
+- **Local** keeps the existing GLES3 renderer and splat cache. It may download
+  or ingest a complete splat, but it never creates a remote render session.
+- **Remote** keeps the complete splat on the server and streams rendered frames.
+  It never silently falls back: an error offers **Retry** or
+  **Use local renderer**.
+
+Remote rendering needs a network connection for every camera update and uses
+server GPU time. Curated photos are referenced by their gallery `photoId`.
+Imported media is uploaded only after the user chooses **Reframe** (or confirms
+a reconstruction anchor); the upload is then owned by a bounded server session
+and released by the app on exit, with server TTL cleanup as a disconnect
+safeguard. Operators should account for image privacy, network usage, and GPU
+cost before enabling this mode. Public-internet authentication and isolation
+are not provided by the trusted-LAN backend configuration.
+
 ## How It Works
 
 The pipeline is:
 
 1. **SHARP** reconstructs a single photo into Gaussian splats.
-2. The Android app streams/caches the splat and renders it with a native GLES3
-   Gaussian-splat viewer.
+2. The Android app either streams/caches the splat for its native GLES3 viewer,
+   or sends versioned camera requests to the remote Orbit renderer.
 3. The user moves the camera with bounded orbit, pan, zoom, and reset controls.
 4. **Generate** captures the current view and runs:
    - **Difix3D** to refine the rendered novel view.
@@ -147,6 +170,8 @@ The pipeline is:
 
 The app includes clear server-unavailable and generate-unavailable states
 instead of leaving the viewer blank when a backend is unreachable.
+Remote capture returns seed RGB, preview RGB, and lossless alpha coverage to the
+same Difix/FLUX Generate flow used by local capture.
 
 ## Project Status
 
@@ -157,6 +182,9 @@ instead of leaving the viewer blank when a backend is unreachable.
 - Backend token verification is not yet enforced by the GPU backend.
 - The public APK defaults to WiCi Cloud and can auto-discover a local backend
   on the same LAN.
+- `remote-render-v1` code and CPU/fake-engine tests are present, but real GPU
+  image quality, latency, memory, and concurrency validation is intentionally
+  deferred until a separate GPU integration phase.
 
 ## Development
 

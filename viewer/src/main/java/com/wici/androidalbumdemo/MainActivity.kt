@@ -75,7 +75,7 @@ import kotlin.math.roundToInt
 import kotlin.coroutines.*
 
 class MainActivity : Activity() {
-    private var glView: SplatGlView? = null
+    private var renderSurface: InteractiveRenderSurface? = null
     private lateinit var renderStatus: TextView
     private lateinit var overlay: ImageView
     private lateinit var generateButton: LinearLayout
@@ -203,7 +203,8 @@ class MainActivity : Activity() {
                     sourceUrl = absoluteGalleryUrl("/source?photoId=${Uri.encode(requestedPhotoId)}"),
                     splatStreamUrl = absoluteGalleryUrl("/splat_stream?photoId=${Uri.encode(requestedPhotoId)}")
                 )
-            showViewer(photo)
+            if (rendererMode() == RendererMode.LOCAL) showViewer(photo)
+            else beginBackendCheckedViewer(photo, "direct-intent")
             return true
         }
         return false
@@ -213,9 +214,9 @@ class MainActivity : Activity() {
         viewerVisible = false
         // Local media previews are opt-in because generating one uploads media.
         previewEnabled = false
-        glView?.shutdown()
-        glView?.onPause()
-        glView = null
+        renderSurface?.shutdown()
+        renderSurface?.pause()
+        renderSurface = null
         viewerRoot = null
         generateErrorOverlay = null
         previewRequestSerial++
@@ -593,7 +594,7 @@ class MainActivity : Activity() {
             val session = ReconstructionSession(policy) { anchorId, confirmedTarget, onStage ->
                 Log.i("Reconstruction", "confirmed anchor=${anchorId.hashCode().toUInt()} target=${confirmedTarget.kind}")
                 showReviewedAnchorViewer(anchorId, anchorUri, confirmedTarget, onStage)
-                object : ReconstructionRequest { override fun cancel() { glView?.shutdown() } }
+                object : ReconstructionRequest { override fun cancel() { renderSurface?.shutdown() } }
             }
             check(session.submit(confirmation, policy.authorize(confirmation)))
         }
@@ -616,7 +617,12 @@ class MainActivity : Activity() {
             hasSplat = false, sourceWidth = null, sourceHeight = null, camFx = null, camFy = null,
             camCx = null, camCy = null, localUri = uri, imported = true,
         )
-        showViewer(photo, target.endpoint, onStage)
+        val authorized = photo.copy(hasSplat = true)
+        if (rendererMode() == RendererMode.LOCAL) {
+            showViewer(authorized, target.endpoint, onStage)
+        } else {
+            beginBackendCheckedViewer(authorized, "confirmed-anchor", target.endpoint, onStage)
+        }
     }
 
     private fun runSceneSuspend(block: suspend () -> Unit) {
@@ -1684,9 +1690,9 @@ class MainActivity : Activity() {
     private fun showPhotoScreen(photo: AlbumPhoto) {
         viewerVisible = true
         previewEnabled = false
-        glView?.shutdown()
-        glView?.onPause()
-        glView = null
+        renderSurface?.shutdown()
+        renderSurface?.pause()
+        renderSurface = null
         viewerRoot = null
         generateErrorOverlay = null
         latestCapture = null
@@ -1806,6 +1812,13 @@ class MainActivity : Activity() {
 
     private fun beginReframing(photo: AlbumPhoto) {
         saveAlbumScrollPosition("beginReframing")
+        if (rendererMode() != RendererMode.LOCAL) {
+            beginBackendCheckedViewer(
+                if (photo.localUri != null) photo.copy(hasSplat = true) else photo,
+                if (photo.imported) "ingest" else "curated-stream",
+            )
+            return
+        }
         if (!photo.imported && photo.hasSplat) {
             if (hasCachedSplat(photo.photoId)) {
                 showViewer(photo)
@@ -1840,7 +1853,12 @@ class MainActivity : Activity() {
         return SplatCache.lookup(this, cacheKey, SPLAT_ROW_BYTES) != null
     }
 
-    private fun beginBackendCheckedViewer(photo: AlbumPhoto, reason: String) {
+    private fun beginBackendCheckedViewer(
+        photo: AlbumPhoto,
+        reason: String,
+        ingestEndpointOverride: String? = null,
+        reconstructionProgress: (ReconstructionStage) -> Unit = {},
+    ) {
         val status = showReframingLoading(photo)
         val base = backendBaseUrl()
         if (requiresCloudLogin(base) && !SupabaseAuth.isLoggedIn()) {
@@ -1848,7 +1866,7 @@ class MainActivity : Activity() {
             promptCloudLogin("Reframe", onFailed = {
                 status.text = "Sign in with Google to use WiCi Cloud."
             }) {
-                beginBackendCheckedViewer(photo, reason)
+                beginBackendCheckedViewer(photo, reason, ingestEndpointOverride, reconstructionProgress)
             }
             return
         }
@@ -1856,25 +1874,146 @@ class MainActivity : Activity() {
         Log.i(TAG, "Backend health precheck start photoId=${photo.photoId} reason=$reason base=$base source=${backendSourceLabel()}")
         networkExecutor.execute {
             val health = checkOrbitHealth(base)
+            val mode = rendererMode()
+            val decision = RenderModePolicy.initial(mode, health.ok, health.capabilities)
+            val remoteSource = if (decision == InitialRendererDecision.REMOTE) {
+                runCatching { remoteSessionSource(photo) }
+            } else {
+                null
+            }
             runOnUiThread {
-                if (health.ok) {
-                    Log.i(TAG, "Backend health precheck ok photoId=${photo.photoId} reason=$reason base=$base elapsedMs=${health.elapsedMs}")
-                    showViewer(photo)
-                } else {
-                    Log.w(TAG, "Backend health precheck failed photoId=${photo.photoId} reason=$reason base=$base elapsedMs=${health.elapsedMs} error=${health.message}")
-                    showBackendUnavailable(photo, base, "health", health.message)
+                when (decision) {
+                    InitialRendererDecision.LOCAL -> {
+                        Log.i(TAG, "Renderer selected local photoId=${photo.photoId} mode=$mode capabilities=${health.capabilities}")
+                        showViewer(photo, ingestEndpointOverride, reconstructionProgress)
+                    }
+                    InitialRendererDecision.REMOTE -> {
+                        val source = remoteSource?.getOrElse { failure ->
+                            if (mode == RendererMode.AUTOMATIC) {
+                                showViewer(photo, ingestEndpointOverride, reconstructionProgress)
+                            } else {
+                                showRemoteRendererError(photo, base, "Cannot prepare image upload: ${failure.message}", ingestEndpointOverride, reconstructionProgress)
+                            }
+                            return@runOnUiThread
+                        } ?: return@runOnUiThread
+                        Log.i(TAG, "Renderer selected remote photoId=${photo.photoId} mode=$mode protocol=${RenderModePolicy.REMOTE_PROTOCOL}")
+                        showViewer(photo, ingestEndpointOverride, reconstructionProgress, RemoteViewerConfig(mode, source))
+                    }
+                    InitialRendererDecision.REMOTE_UNAVAILABLE -> {
+                        Log.w(TAG, "Explicit remote unavailable photoId=${photo.photoId} health=${health.message} capabilities=${health.capabilities}")
+                        showRemoteRendererError(
+                            photo,
+                            base,
+                            if (health.ok) "This server does not advertise ${RenderModePolicy.REMOTE_PROTOCOL}." else "Remote renderer unavailable: ${health.message}",
+                            ingestEndpointOverride,
+                            reconstructionProgress,
+                        )
+                    }
                 }
             }
         }
+    }
+
+    private fun remoteSessionSource(photo: AlbumPhoto): RemoteSessionSource =
+        if (photo.imported) {
+            requireNotNull(photo.localUri) { "imported photo has no authorized local URI" }
+            RemoteSessionSource.Image(localSourceJpegBytes(photo), "${photo.photoId}.jpg", "image/jpeg")
+        } else {
+            RemoteSessionSource.Gallery(photo.photoId)
+        }
+
+    private fun handleRemoteRendererFailure(
+        photo: AlbumPhoto,
+        baseUrl: String,
+        config: RemoteViewerConfig,
+        failure: RemoteTransportException,
+        ingestEndpointOverride: String?,
+        reconstructionProgress: (ReconstructionStage) -> Unit,
+    ) {
+        when (RenderModePolicy.afterRemoteFailure(
+            config.mode, failure.retryable, failure.sessionExpired, config.recreationAlreadyUsed,
+        )) {
+            RemoteFailureDecision.RETRY_REMOTE_ONCE -> {
+                renderSurface?.shutdown()
+                showViewer(
+                    photo, ingestEndpointOverride, reconstructionProgress,
+                    config.copy(recreationAlreadyUsed = true),
+                )
+            }
+            RemoteFailureDecision.FALLBACK_LOCAL -> {
+                renderSurface?.shutdown()
+                showViewer(photo, ingestEndpointOverride, reconstructionProgress)
+            }
+            RemoteFailureDecision.SHOW_REMOTE_ERROR -> showRemoteRendererError(
+                photo, baseUrl, failure.message ?: "Remote renderer failed",
+                ingestEndpointOverride, reconstructionProgress,
+            )
+        }
+    }
+
+    private fun showRemoteRendererError(
+        photo: AlbumPhoto,
+        failedBaseUrl: String,
+        detail: String,
+        ingestEndpointOverride: String?,
+        reconstructionProgress: (ReconstructionStage) -> Unit,
+    ) {
+        renderSurface?.shutdown()
+        renderSurface?.pause()
+        renderSurface = null
+        viewerVisible = true
+        currentViewerPhoto = photo
+        latestCapture = null
+
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(30), dp(30), dp(30), dp(30))
+            addView(TextView(this@MainActivity).apply {
+                text = "Remote renderer unavailable"
+                setTextColor(COLOR_INK); textSize = 22f; typeface = spaceGrotesk(700)
+                gravity = Gravity.CENTER; includeFontPadding = false
+            }, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            addView(TextView(this@MainActivity).apply {
+                text = detail
+                setTextColor(COLOR_INK_SOFT); textSize = 14f; typeface = inter(500)
+                gravity = Gravity.CENTER; includeFontPadding = false
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+            addView(TextView(this@MainActivity).apply {
+                text = "Retry"; setTextColor(Color.WHITE); textSize = 15f; typeface = inter(700)
+                gravity = Gravity.CENTER; includeFontPadding = false; isClickable = true; isFocusable = true
+                background = roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(24).toFloat())
+                setPadding(dp(26), 0, dp(26), 0)
+                setOnClickListener { beginBackendCheckedViewer(photo, "explicit-remote-retry", ingestEndpointOverride, reconstructionProgress) }
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)).apply { topMargin = dp(22) })
+            addView(TextView(this@MainActivity).apply {
+                text = "Use local renderer"; setTextColor(COLOR_ACCENT); textSize = 15f; typeface = inter(650)
+                gravity = Gravity.CENTER; includeFontPadding = false; isClickable = true; isFocusable = true
+                setPadding(dp(18), 0, dp(18), 0)
+                setOnClickListener { showViewer(photo, ingestEndpointOverride, reconstructionProgress) }
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)).apply { topMargin = dp(8) })
+        }
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+            addView(studioBackButton(), FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.TOP).apply {
+                topMargin = dp(26); leftMargin = dp(18)
+            })
+            addView(stack, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                leftMargin = dp(18); rightMargin = dp(18)
+            })
+        }
+        applyFullscreen(root)
+        setContentView(root)
+        Log.w(TAG, "Remote renderer error photoId=${photo.photoId} base=$failedBaseUrl detail=${detail.take(180)}")
     }
 
     private fun showReframingLoading(photo: AlbumPhoto): TextView {
         saveAlbumScrollPosition("showReframingLoading")
         viewerVisible = true
         previewEnabled = false
-        glView?.shutdown()
-        glView?.onPause()
-        glView = null
+        renderSurface?.shutdown()
+        renderSurface?.pause()
+        renderSurface = null
         viewerRoot = null
         generateErrorOverlay = null
         latestCapture = null
@@ -1933,7 +2072,8 @@ class MainActivity : Activity() {
     private data class BackendHealthResult(
         val ok: Boolean,
         val message: String,
-        val elapsedMs: Long
+        val elapsedMs: Long,
+        val capabilities: Set<String> = emptySet(),
     )
 
     private data class GenerateHealthResult(
@@ -1954,7 +2094,23 @@ class MainActivity : Activity() {
             }
             val code = conn.responseCode
             if (code in 200..299) {
-                BackendHealthResult(true, "HTTP $code", elapsedMs(started))
+                val capabilities = if (service == "orbit") {
+                    val body = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
+                        val result = StringBuilder()
+                        val buffer = CharArray(4096)
+                        while (true) {
+                            val count = reader.read(buffer)
+                            if (count < 0) break
+                            if (result.length + count > BACKEND_HEALTH_MAX_CHARS) {
+                                throw IllegalArgumentException("health response is too large")
+                            }
+                            result.append(buffer, 0, count)
+                        }
+                        result.toString()
+                    }
+                    RenderModePolicy.capabilitiesFromHealth(body)
+                } else emptySet()
+                BackendHealthResult(true, "HTTP $code", elapsedMs(started), capabilities)
             } else {
                 BackendHealthResult(false, "HTTP $code", elapsedMs(started))
             }
@@ -2002,9 +2158,9 @@ class MainActivity : Activity() {
 
         viewerVisible = true
         previewEnabled = false
-        glView?.shutdown()
-        glView?.onPause()
-        glView = null
+        renderSurface?.shutdown()
+        renderSurface?.pause()
+        renderSurface = null
         latestCapture = null
         fluxDataUrl = null
         finalBitmap = null
@@ -2217,6 +2373,7 @@ class MainActivity : Activity() {
         photo: AlbumPhoto,
         ingestEndpointOverride: String? = null,
         reconstructionProgress: (ReconstructionStage) -> Unit = {},
+        remoteConfig: RemoteViewerConfig? = null,
     ) {
         if (!photo.hasSplat) {
             if (photo.localUri != null) beginReframing(photo) else showStaticPhoto(photo)
@@ -2263,43 +2420,50 @@ class MainActivity : Activity() {
         val viewerBackendBase = backendBaseUrl()
         val viewerGalleryUrl = "$viewerBackendBase/orbit"
 
-        val viewer = SplatGlView(
-            this,
-            assetName,
-            photo.photoId,
-            { message -> runOnUiThread { renderStatus.text = message } },
-            { capture -> handleReleaseCapture(capture) },
-            { error ->
-                runOnUiThread {
+        var remoteFailureHandled = false
+        val surface: InteractiveRenderSurface = if (remoteConfig == null) {
+            SplatGlView(
+                this, assetName, photo.photoId,
+                { message -> runOnUiThread { renderStatus.text = message } },
+                { capture -> handleReleaseCapture(capture) },
+                { error -> runOnUiThread {
                     if (viewerVisible && currentViewerPhoto?.photoId == photo.photoId) {
                         showBackendUnavailable(photo, viewerBackendBase, "stream", error)
                     }
-                }
-            },
-            { beginLiveOrbit() },
-            releaseCaptureEnabled,
-            postPassEnabled,
-            streamDensityOverride,
-            footprintScaleOverride,
-            photo.sourceWidth,
-            photo.sourceHeight,
-            photo.camFx,
-            photo.camFy,
-            photo.camCx,
-            photo.camCy,
-            photo.splatStreamUrl,
-            "$viewerGalleryUrl/splat_stream",
-            ingestEndpointOverride ?: "$viewerGalleryUrl/ingest",
-            photo.localUri?.takeIf { photo.imported }?.toString(),
-            splatCacheMaxBytesOverride,
-            networkStreamEnabled = !photo.imported || photo.localUri != null,
-            reconstructionProgress = { stage ->
-                reconstructionProgress(stage)
-                Log.i("Reconstruction", "stage=${stage.javaClass.simpleName}")
-            },
-            sceneViewMetadata = sceneViewMetadataOverride,
-        )
-        glView = viewer
+                } },
+                { beginLiveOrbit() }, releaseCaptureEnabled, postPassEnabled,
+                streamDensityOverride, footprintScaleOverride,
+                photo.sourceWidth, photo.sourceHeight, photo.camFx, photo.camFy, photo.camCx, photo.camCy,
+                photo.splatStreamUrl, "$viewerGalleryUrl/splat_stream",
+                ingestEndpointOverride ?: "$viewerGalleryUrl/ingest",
+                photo.localUri?.takeIf { photo.imported }?.toString(), splatCacheMaxBytesOverride,
+                networkStreamEnabled = !photo.imported || photo.localUri != null,
+                reconstructionProgress = { stage ->
+                    reconstructionProgress(stage)
+                    Log.i("Reconstruction", "stage=${stage.javaClass.simpleName}")
+                },
+                sceneViewMetadata = sceneViewMetadataOverride,
+            )
+        } else {
+            RemoteRenderView(
+                this,
+                RemoteRenderTransport("$viewerBackendBase/orbit"),
+                remoteConfig.source,
+                status = { message -> runOnUiThread { renderStatus.text = message } },
+                error = { failure -> runOnUiThread {
+                    if (remoteFailureHandled || !viewerVisible || currentViewerPhoto?.photoId != photo.photoId) return@runOnUiThread
+                    remoteFailureHandled = true
+                    handleRemoteRendererFailure(
+                        photo, viewerBackendBase, remoteConfig, failure,
+                        ingestEndpointOverride, reconstructionProgress,
+                    )
+                } },
+                releaseCapture = { capture -> handleReleaseCapture(capture) },
+                interactionStarted = { beginLiveOrbit() },
+            )
+        }
+        val viewer = surface as View
+        renderSurface = surface
 
         val root = FrameLayout(this).apply {
             setBackgroundColor(COLOR_CANVAS)
@@ -2331,7 +2495,7 @@ class MainActivity : Activity() {
             }
         )
         root.addView(
-            viewerResetButton(viewer),
+            viewerResetButton(surface),
             FrameLayout.LayoutParams(
                 dp(78),
                 dp(44),
@@ -2367,15 +2531,16 @@ class MainActivity : Activity() {
         updateViewerControls()
         applyFullscreen(root)
         setContentView(root)
+        renderSurface?.resume()
     }
 
     private fun showStaticPhoto(photo: AlbumPhoto) {
         saveAlbumScrollPosition("showStaticPhoto")
         viewerVisible = true
         previewEnabled = false
-        glView?.shutdown()
-        glView?.onPause()
-        glView = null
+        renderSurface?.shutdown()
+        renderSurface?.pause()
+        renderSurface = null
         viewerRoot = null
         generateErrorOverlay = null
         latestCapture = null
@@ -2445,11 +2610,11 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        glView?.onResume()
+        renderSurface?.resume()
     }
 
     override fun onPause() {
-        glView?.onPause()
+        renderSurface?.pause()
         super.onPause()
     }
 
@@ -2457,7 +2622,7 @@ class MainActivity : Activity() {
         previewHandler.removeCallbacksAndMessages(null)
         backendHandler.removeCallbacksAndMessages(null)
         stopBackendDiscovery()
-        glView?.shutdown()
+        renderSurface?.shutdown()
         networkExecutor.shutdownNow()
         thumbnailExecutor.shutdownNow()
         previewBakeExecutor.shutdownNow()
@@ -3369,6 +3534,7 @@ class MainActivity : Activity() {
 
     private fun showBackendSettingsDialog() {
         var manualMode = manualBackendBaseUrl() != null
+        var selectedRendererMode = rendererMode()
         lateinit var automaticSegment: TextView
         lateinit var manualSegment: TextView
         lateinit var contextZone: LinearLayout
@@ -3546,6 +3712,43 @@ class MainActivity : Activity() {
             addView(contextZone, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(16)
             })
+            addView(TextView(this@MainActivity).apply {
+                text = "Renderer"
+                setTextColor(COLOR_INK_SOFT)
+                textSize = 12f
+                typeface = inter(600)
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(20)
+            })
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(3), dp(3), dp(3), dp(3))
+                background = rounded(COLOR_CANVAS, dp(13).toFloat())
+                val buttons = linkedMapOf<RendererMode, TextView>()
+                fun refresh() = buttons.forEach { (mode, button) -> styleServerSegment(button, mode == selectedRendererMode) }
+                RendererMode.entries.forEach { mode ->
+                    val label = mode.name.lowercase().replaceFirstChar { it.uppercase() }
+                    val button = serverSegmentButton(label).apply {
+                        setOnClickListener { selectedRendererMode = mode; refresh() }
+                    }
+                    buttons[mode] = button
+                    addView(button, LinearLayout.LayoutParams(0, dp(38), 1f))
+                }
+                refresh()
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply {
+                topMargin = dp(8)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "Automatic uses remote rendering only when the server advertises ${RenderModePolicy.REMOTE_PROTOCOL}."
+                setTextColor(COLOR_INK_SOFT)
+                textSize = 12f
+                typeface = inter(400)
+                includeFontPadding = false
+                setLineSpacing(dpFloat(2f), 1f)
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            })
             addView(
                 View(this@MainActivity).apply {
                     setBackgroundColor(COLOR_HAIRLINE)
@@ -3657,6 +3860,7 @@ class MainActivity : Activity() {
                                     clearBackendBaseUrlOverride()
                                     Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
                                 }
+                                saveRendererMode(selectedRendererMode)
                                 dismissSettingsSheet()
                             }
                         },
@@ -3735,6 +3939,17 @@ class MainActivity : Activity() {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .edit()
             .putString(PREF_BACKEND_BASE_URL, value)
+            .apply()
+    }
+
+    private fun rendererMode(): RendererMode = RendererMode.fromPersisted(
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(PREF_RENDERER_MODE, null)
+    )
+
+    private fun saveRendererMode(mode: RendererMode) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(PREF_RENDERER_MODE, mode.persistedValue)
             .apply()
     }
 
@@ -3982,7 +4197,7 @@ class MainActivity : Activity() {
             setOnClickListener { showAlbum() }
         }
 
-    private fun viewerResetButton(viewer: SplatGlView): TextView =
+    private fun viewerResetButton(viewer: InteractiveRenderSurface): TextView =
         TextView(this).apply {
             text = "Reset"
             textSize = 13f
@@ -3997,7 +4212,7 @@ class MainActivity : Activity() {
             applySoftShadow(this, 3)
             setOnClickListener {
                 beginLiveOrbit()
-                viewer.resetView()
+                viewer.reset()
             }
         }
 
@@ -4468,6 +4683,12 @@ class MainActivity : Activity() {
         val splatAsset: String get() = "$photoId.splat"
     }
 
+    private data class RemoteViewerConfig(
+        val mode: RendererMode,
+        val source: RemoteSessionSource,
+        val recreationAlreadyUsed: Boolean = false,
+    )
+
     private data class AlbumScrollState(
         val firstVisiblePosition: Int,
         val topOffsetPx: Int
@@ -4512,10 +4733,12 @@ class MainActivity : Activity() {
         private const val PREFS_NAME = "android-album-demo"
         private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
         private const val PREF_BACKEND_BASE_URL = "backend_base_url"
+        private const val PREF_RENDERER_MODE = "renderer_mode"
         private const val DEFAULT_BACKEND_BASE_URL = "http://app.wici.ai:54228"
         private const val NSD_BACKEND_SERVICE_TYPE = "_wici-backend._tcp."
         private const val NSD_DISCOVERY_TIMEOUT_MS = 3_000L
         private const val BACKEND_HEALTH_TIMEOUT_MS = 2_500
+        private const val BACKEND_HEALTH_MAX_CHARS = 64 * 1024
         private const val ADD_TILE_ID = "__add_photo__"
         private const val SHOW_RENDER_DEBUG = false
         private const val EDIT_JIGGLE_DEGREES = 1.5f
