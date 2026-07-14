@@ -10,7 +10,6 @@ import android.net.Uri
 import android.os.SystemClock
 import android.util.Half
 import android.util.Log
-import android.util.Base64
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
@@ -105,6 +104,7 @@ class SplatRenderer(
     private var releaseCaptureReason = "unknown"
     private var lastReleaseCaptureDeferredLogMs = 0L
     private val captureRunning = AtomicBoolean(false)
+    private val releaseCaptureBuilder = ReleaseCaptureBuilder()
 
     private var splatProgram = 0
     private var blitProgram = 0
@@ -1175,13 +1175,6 @@ class SplatRenderer(
         val maxNdcY: Float,
         val visiblePx: Float,
         val validCorners: Int
-    )
-
-    private data class CaptureRect(
-        val x: Int,
-        val y: Int,
-        val width: Int,
-        val height: Int
     )
 
     private fun applyPendingSourceCamera() {
@@ -2369,7 +2362,9 @@ class SplatRenderer(
             captureExecutor.execute {
                 val buildStartNs = System.nanoTime()
                 try {
-                    val capture = buildReleaseCapture(m, fboPixels, previewPixels, renderW, renderH, captureRect)
+                    val capture = releaseCaptureBuilder.buildLocal(
+                        m.assetName, fboPixels, previewPixels, renderW, renderH, captureRect,
+                    )
                     val buildNs = System.nanoTime() - buildStartNs
                     Log.i(
                         TAG,
@@ -2412,237 +2407,6 @@ class SplatRenderer(
         buffer.position(0)
         buffer.get(raw)
         return raw
-    }
-
-    private fun buildReleaseCapture(
-        m: SplatModel,
-        fboPixels: ByteArray,
-        previewPixels: ByteArray,
-        renderW: Int,
-        renderH: Int,
-        captureRect: CaptureRect
-    ): ReleaseCapture {
-        val captureW = captureRect.width
-        val captureH = captureRect.height
-        val total = captureW * captureH
-        val seedArgb = IntArray(total)
-        val previewArgb = IntArray(total)
-        val gap = ByteArray(total)
-        var gapPx = 0
-        var coveredPx = 0
-        for (y in 0 until captureH) {
-            val screenY = captureRect.y + y
-            val srcY = renderH - 1 - screenY
-            for (x in 0 until captureW) {
-                val screenX = captureRect.x + x
-                val dst = y * captureW + x
-                val src = (srcY * renderW + screenX) * 4
-                val sr = fboPixels[src].toInt() and 0xff
-                val sg = fboPixels[src + 1].toInt() and 0xff
-                val sb = fboPixels[src + 2].toInt() and 0xff
-                val sa = fboPixels[src + 3].toInt() and 0xff
-                seedArgb[dst] = -0x1000000 or (sr shl 16) or (sg shl 8) or sb
-                // Hole = the splat coverage lets the background show through by more than the
-                // tolerance, i.e. coverage < ~97%. This mirrors the web reference exactly: the web's
-                // black-vs-magenta render diff equals (255 - alpha), so testing (255 - sa) here gives
-                // the same gap without a second render. The old sa<=8 test only caught the fully
-                // empty core and missed the sparse splat-thinning disocclusion boundary, making the
-                // phone's peripheral mask smaller than the web's (difix then refined that low-quality
-                // fringe instead of letting flux regenerate it).
-                if (255 - sa > MASK_TOLERANCE) {
-                    gap[dst] = 1
-                    gapPx++
-                } else {
-                    coveredPx++
-                }
-
-                val pr = previewPixels[src].toInt() and 0xff
-                val pg = previewPixels[src + 1].toInt() and 0xff
-                val pb = previewPixels[src + 2].toInt() and 0xff
-                previewArgb[dst] = -0x1000000 or (pr shl 16) or (pg shl 8) or pb
-            }
-        }
-
-        // Align mask construction with the web reference: clean the raw coverage gap with the same
-        // morphological pipeline (removeSmall -> dilate -> erode -> removeSmall) before classifying.
-        // The phone previously skipped this, so its peripheral/refine masks were raw and jagged and
-        // diverged from the web's for the same view. Parameters scale with capture resolution.
-        val cleanedGap = cleanGapMask(gap, captureW, captureH)
-        gapPx = 0
-        for (i in 0 until total) if (cleanedGap[i].toInt() != 0) gapPx++
-        coveredPx = total - gapPx
-        val peripheral = floodBorder(cleanedGap, captureW, captureH)
-        val refine = ByteArray(total)
-        var peripheralPx = 0
-        var interiorPx = 0
-        for (i in 0 until total) {
-            if (peripheral[i].toInt() != 0) {
-                peripheralPx++
-                refine[i] = 0
-            } else {
-                refine[i] = 1
-                if (cleanedGap[i].toInt() != 0) interiorPx++
-            }
-        }
-
-        val scale = min(1f, RELEASE_MAX_SIDE.toFloat() / max(captureW, captureH).toFloat())
-        val outW = max(1, (captureW * scale).toInt())
-        val outH = max(1, (captureH * scale).toInt())
-        val seedFull = Bitmap.createBitmap(seedArgb, captureW, captureH, Bitmap.Config.ARGB_8888)
-        val previewFull = Bitmap.createBitmap(previewArgb, captureW, captureH, Bitmap.Config.ARGB_8888)
-        val refineFull = maskBitmap(refine, captureW, captureH)
-        val peripheralFull = maskBitmap(peripheral, captureW, captureH)
-        val seed = Bitmap.createScaledBitmap(seedFull, outW, outH, true)
-        val preview = Bitmap.createScaledBitmap(previewFull, outW, outH, true)
-        val refineMask = Bitmap.createScaledBitmap(refineFull, outW, outH, false)
-        val peripheralMask = Bitmap.createScaledBitmap(peripheralFull, outW, outH, false)
-        seedFull.recycle()
-        previewFull.recycle()
-        refineFull.recycle()
-        peripheralFull.recycle()
-
-        return ReleaseCapture(
-            assetName = m.assetName,
-            renderWidth = captureW,
-            renderHeight = captureH,
-            width = outW,
-            height = outH,
-            seedDataUrl = bitmapDataUrl(seed, Bitmap.CompressFormat.JPEG, DIFIX_CAPTURE_JPEG_QUALITY),
-            previewDataUrl = bitmapDataUrl(preview, Bitmap.CompressFormat.JPEG, DIFIX_CAPTURE_JPEG_QUALITY),
-            refineMaskDataUrl = bitmapDataUrl(refineMask, Bitmap.CompressFormat.PNG, 100),
-            peripheralMaskDataUrl = bitmapDataUrl(peripheralMask, Bitmap.CompressFormat.PNG, 100),
-            gapPx = gapPx,
-            peripheralPx = peripheralPx,
-            interiorPx = interiorPx,
-            coveredPx = coveredPx,
-            alphaThreshold = MASK_TOLERANCE,
-            releaseMaxSide = RELEASE_MAX_SIDE
-        )
-    }
-
-    private fun floodBorder(mask: ByteArray, w: Int, h: Int): ByteArray {
-        val n = w * h
-        val out = ByteArray(n)
-        val queue = IntArray(n)
-        var head = 0
-        var tail = 0
-
-        fun add(idx: Int) {
-            if (idx in 0 until n && mask[idx].toInt() != 0 && out[idx].toInt() == 0) {
-                out[idx] = 1
-                queue[tail++] = idx
-            }
-        }
-
-        for (x in 0 until w) {
-            add(x)
-            add((h - 1) * w + x)
-        }
-        for (y in 0 until h) {
-            add(y * w)
-            add(y * w + w - 1)
-        }
-        while (head < tail) {
-            val idx = queue[head++]
-            val x = idx % w
-            add(idx - w)
-            add(idx + w)
-            if (x > 0) add(idx - 1)
-            if (x < w - 1) add(idx + 1)
-        }
-        return out
-    }
-
-    private fun maskBitmap(mask: ByteArray, w: Int, h: Int): Bitmap {
-        val pixels = IntArray(w * h)
-        for (i in pixels.indices) {
-            pixels[i] = if (mask[i].toInt() != 0) -0x1 else -0x1000000
-        }
-        return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
-    }
-
-    // Port of the web reference gap cleanup (buildGapMask). The web tunes removeSmall(80) ->
-    // dilate(2) -> erode(1) -> removeSmall(120) for a 960-px longest side; scale those to this
-    // capture's native resolution so the physical morphology matches. Linear ops scale by
-    // refScale, area thresholds by refScale^2.
-    private fun cleanGapMask(raw: ByteArray, w: Int, h: Int): ByteArray {
-        val refScale = max(w, h).toFloat() / RELEASE_MAX_SIDE.toFloat()
-        val area1 = Math.round(80f * refScale * refScale)
-        val dilateIt = max(1, Math.round(2f * refScale))
-        val erodeIt = max(1, Math.round(1f * refScale))
-        val area2 = Math.round(120f * refScale * refScale)
-        var g = removeSmallComponents(raw, w, h, area1)
-        g = dilate4(g, w, h, dilateIt)
-        g = erode4(g, w, h, erodeIt)
-        return removeSmallComponents(g, w, h, area2)
-    }
-
-    private fun dilate4(mask: ByteArray, w: Int, h: Int, iterations: Int): ByteArray {
-        var cur = mask
-        val n = w * h
-        repeat(iterations) {
-            val out = cur.copyOf()
-            for (i in 0 until n) {
-                if (cur[i].toInt() == 0) continue
-                val x = i % w
-                if (i >= w) out[i - w] = 1
-                if (i < n - w) out[i + w] = 1
-                if (x > 0) out[i - 1] = 1
-                if (x < w - 1) out[i + 1] = 1
-            }
-            cur = out
-        }
-        return cur
-    }
-
-    private fun erode4(mask: ByteArray, w: Int, h: Int, iterations: Int): ByteArray {
-        val inv = ByteArray(mask.size)
-        for (i in mask.indices) inv[i] = if (mask[i].toInt() != 0) 0.toByte() else 1.toByte()
-        val grown = dilate4(inv, w, h, iterations)
-        val out = ByteArray(mask.size)
-        for (i in mask.indices) out[i] = if (grown[i].toInt() != 0) 0.toByte() else 1.toByte()
-        return out
-    }
-
-    private fun removeSmallComponents(mask: ByteArray, w: Int, h: Int, minArea: Int): ByteArray {
-        if (minArea <= 1) return mask.copyOf()
-        val n = w * h
-        val seen = ByteArray(n)
-        val out = ByteArray(n)
-        val queue = IntArray(n)
-        val comp = IntArray(n)
-        for (start in 0 until n) {
-            if (mask[start].toInt() == 0 || seen[start].toInt() != 0) continue
-            var head = 0
-            var tail = 0
-            var compLen = 0
-            queue[tail++] = start
-            seen[start] = 1
-            while (head < tail) {
-                val idx = queue[head++]
-                comp[compLen++] = idx
-                val x = idx % w
-                val up = idx - w
-                val down = idx + w
-                if (up >= 0 && mask[up].toInt() != 0 && seen[up].toInt() == 0) { seen[up] = 1; queue[tail++] = up }
-                if (down < n && mask[down].toInt() != 0 && seen[down].toInt() == 0) { seen[down] = 1; queue[tail++] = down }
-                if (x > 0 && mask[idx - 1].toInt() != 0 && seen[idx - 1].toInt() == 0) { seen[idx - 1] = 1; queue[tail++] = idx - 1 }
-                if (x < w - 1 && mask[idx + 1].toInt() != 0 && seen[idx + 1].toInt() == 0) { seen[idx + 1] = 1; queue[tail++] = idx + 1 }
-            }
-            if (compLen >= minArea) {
-                for (i in 0 until compLen) out[comp[i]] = 1
-            }
-        }
-        return out
-    }
-
-    private fun bitmapDataUrl(bitmap: Bitmap, format: Bitmap.CompressFormat, quality: Int): String {
-        val out = ByteArrayOutputStream()
-        bitmap.compress(format, quality, out)
-        val mime = if (format == Bitmap.CompressFormat.PNG) "image/png" else "image/jpeg"
-        val encoded = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-        bitmap.recycle()
-        return "data:$mime;base64,$encoded"
     }
 
     private fun quickSort(order: IntArray, depth: FloatArray, left: Int, right: Int) {
@@ -2691,9 +2455,6 @@ class SplatRenderer(
         private const val SORT_THRESHOLD_RAD = 0.06f
         private const val PYRAMID_LEVELS = 11
         private const val FINAL_DILATION_PX = 5.0f
-        private const val MASK_TOLERANCE = 8
-        private const val RELEASE_MAX_SIDE = 960
-        private const val DIFIX_CAPTURE_JPEG_QUALITY = 90
         private const val NEAR_PLANE = 0.02f
         private const val FAR_PLANE = 500f
         private const val TWO_PI = (Math.PI * 2.0).toFloat()

@@ -17,13 +17,15 @@ class RemoteRenderView(
     private val source: RemoteSessionSource,
     private val status: (String) -> Unit = {},
     private val error: (RemoteTransportException) -> Unit = {},
-    private val captureReady: (RemoteFrame) -> Unit = {},
+    private val releaseCapture: (ReleaseCapture) -> Unit = {},
     private val interactionStarted: () -> Unit = {},
     executor: ExecutorService? = null,
 ) : ImageView(context), InteractiveRenderSurface {
     private val worker = executor ?: Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "wici-remote-render") }
     private val ownsExecutor = executor == null
     private val gate = RemoteFrameGate()
+    private val captureGate = RemoteCaptureGate()
+    private val captureBuilder = ReleaseCaptureBuilder()
     private val nextRequestId = AtomicLong()
     private val stateLock = Any()
     private var session: RemoteRenderSession? = null
@@ -64,7 +66,7 @@ class RemoteRenderView(
     }
 
     override fun reset() {
-        interactionStarted()
+        beginInteraction()
         synchronized(stateLock) { cameraController?.reset() }
         requestFrame("interactive")
     }
@@ -80,6 +82,7 @@ class RemoteRenderView(
             }
         }
         gate.close()
+        captureGate.close()
         scheduler.shutdown()
         client.cancelActive()
         if (sessionId != null) worker.execute { runCatching { client.deleteSession(sessionId) } }
@@ -102,11 +105,11 @@ class RemoteRenderView(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                interactionStarted()
+                beginInteraction()
                 lastX = event.x; lastY = event.y; pinching = false; pinchDistance = 0f
             }
             MotionEvent.ACTION_POINTER_DOWN -> if (event.pointerCount >= 2) {
-                interactionStarted()
+                beginInteraction()
                 pinching = true
                 pinchDistance = distance(event)
                 pinchCenterX = centerX(event)
@@ -194,7 +197,9 @@ class RemoteRenderView(
     private fun requestFrame(mode: String) {
         val scheduled = synchronized(stateLock) {
             if (closed || paused || session == null || cameraController == null) null
-            else ScheduledRemoteFrame(generation, nextRequestId.getAndIncrement(), mode, cameraController!!.camera())
+            else ScheduledRemoteFrame(
+                generation, nextRequestId.getAndIncrement(), mode, cameraController!!.camera(), captureGate.snapshot(),
+            )
         }
         if (scheduled != null) scheduler.submit(scheduled)
     }
@@ -208,10 +213,25 @@ class RemoteRenderView(
 
     private fun completeScheduled(frame: ScheduledRemoteFrame, result: Result<RemoteFrame>) {
         result.onSuccess { remote ->
-            if (!gate.accept(frame.generation, remote.metadata.requestId)) return@onSuccess
             if (frame.mode == "capture") {
-                post { if (isRenderable(frame.generation)) captureReady(remote) }
+                if (!captureGate.accept(frame.captureEpoch) || !gate.accept(frame.generation, remote.metadata.requestId)) return@onSuccess
+                try {
+                    val activeSession = synchronized(stateLock) {
+                        session?.takeIf { generation == frame.generation && !closed && !paused }
+                    } ?: return@onSuccess
+                    val archive = RemoteCaptureZipParser.parse(
+                        remote.body, activeSession.sessionId, remote.metadata.requestId,
+                        remote.metadata.width, remote.metadata.height,
+                    )
+                    val capture = captureBuilder.buildRemote(captureAssetName(), archive)
+                    post {
+                        if (isRenderable(frame.generation) && captureGate.accept(frame.captureEpoch)) releaseCapture(capture)
+                    }
+                } catch (failure: Throwable) {
+                    report(RemoteTransportException("invalid remote capture: ${failure.message}", cause = failure))
+                }
             } else {
+                if (!gate.accept(frame.generation, remote.metadata.requestId)) return@onSuccess
                 val bitmap = BitmapFactory.decodeByteArray(remote.body, 0, remote.body.size)
                 if (bitmap == null) report(RemoteTransportException("interactive response is not a decodable JPEG"))
                 else if (bitmap.width != remote.metadata.width || bitmap.height != remote.metadata.height) {
@@ -225,6 +245,16 @@ class RemoteRenderView(
 
     private fun isRenderable(candidate: Long) = synchronized(stateLock) {
         !closed && !paused && generation == candidate
+    }
+
+    private fun beginInteraction() {
+        captureGate.beginInteraction()
+        interactionStarted()
+    }
+
+    private fun captureAssetName(): String = when (source) {
+        is RemoteSessionSource.Gallery -> source.photoId
+        is RemoteSessionSource.Image -> source.filename
     }
 
     private fun report(failure: Throwable) {

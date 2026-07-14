@@ -7,6 +7,7 @@ data class ScheduledRemoteFrame(
     val requestId: Long,
     val mode: String,
     val camera: RemoteCamera,
+    val captureEpoch: Long = 0,
 )
 
 /**
@@ -79,6 +80,23 @@ class RemoteFrameGate {
         displayedRequestId = requestId
         return true
     }
+
+    @Synchronized fun close() { closed = true }
+}
+
+/** Invalidates a requested capture as soon as a newer interaction begins. */
+class RemoteCaptureGate {
+    private var epoch = 0L
+    private var closed = false
+
+    @Synchronized fun beginInteraction(): Long {
+        if (!closed) epoch += 1
+        return epoch
+    }
+
+    @Synchronized fun snapshot(): Long = epoch
+
+    @Synchronized fun accept(candidateEpoch: Long): Boolean = !closed && candidateEpoch == epoch
 
     @Synchronized fun close() { closed = true }
 }

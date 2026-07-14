@@ -1,0 +1,7 @@
+{
+  "width": 240,
+  "height": 160,
+  "boundaryHole": [0, 40, 12, 24],
+  "interiorHole": [100, 60, 16, 16],
+  "smallNoise": [180, 100]
+}
