@@ -1,0 +1,50 @@
+{
+  "protocol": "remote-render-v1",
+  "convention": "opencv-w2c-row-major-4x4",
+  "vectors": [
+    {
+      "name": "identity-centered",
+      "valid": true,
+      "w2c": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      "intrinsics": {"fx": 800, "fy": 800, "cx": 320, "cy": 240},
+      "width": 640,
+      "height": 480
+    },
+    {
+      "name": "asymmetric-rigid-noncentered",
+      "valid": true,
+      "w2c": [0, -1, 0, 1.25, 1, 0, 0, -2.5, 0, 0, 1, 3.75, 0, 0, 0, 1],
+      "intrinsics": {"fx": 910.5, "fy": 887.25, "cx": 301.75, "cy": 219.5},
+      "width": 640,
+      "height": 480
+    },
+    {
+      "name": "resize-half",
+      "valid": true,
+      "derivedFrom": "asymmetric-rigid-noncentered",
+      "scale": {"x": 0.5, "y": 0.5},
+      "w2c": [0, -1, 0, 1.25, 1, 0, 0, -2.5, 0, 0, 1, 3.75, 0, 0, 0, 1],
+      "intrinsics": {"fx": 455.25, "fy": 443.625, "cx": 150.875, "cy": 109.75},
+      "width": 320,
+      "height": 240
+    },
+    {
+      "name": "invalid-scaled-rotation",
+      "valid": false,
+      "errorCode": "invalid_camera",
+      "w2c": [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      "intrinsics": {"fx": 800, "fy": 800, "cx": 320, "cy": 240},
+      "width": 640,
+      "height": 480
+    },
+    {
+      "name": "invalid-reflection",
+      "valid": false,
+      "errorCode": "invalid_camera",
+      "w2c": [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      "intrinsics": {"fx": 800, "fy": 800, "cx": 320, "cy": 240},
+      "width": 640,
+      "height": 480
+    }
+  ]
+}
