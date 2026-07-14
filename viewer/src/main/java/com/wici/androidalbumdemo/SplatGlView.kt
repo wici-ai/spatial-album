@@ -36,7 +36,7 @@ class SplatGlView(
     reconstructionProgress: (ReconstructionStage) -> Unit = {},
     localMediaSource: LocalMediaSource = AndroidLocalMediaSource(context.applicationContext),
     sceneViewMetadata: SceneViewMetadata? = null,
-) : GLSurfaceView(context) {
+) : GLSurfaceView(context), InteractiveRenderSurface {
     private val splatRenderer = SplatRenderer(
         context.applicationContext,
         assetName,
@@ -205,9 +205,15 @@ class SplatGlView(
         return super.onGenericMotionEvent(event)
     }
 
-    fun shutdown() {
+    override fun resume() = onResume()
+
+    override fun pause() = onPause()
+
+    override fun shutdown() {
         splatRenderer.shutdown()
     }
+
+    override fun reset() = resetView()
 
     fun resetView() {
         interactionStarted()
