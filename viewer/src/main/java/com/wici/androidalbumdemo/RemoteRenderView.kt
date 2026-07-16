@@ -19,6 +19,7 @@ class RemoteRenderView(
     private val error: (RemoteTransportException) -> Unit = {},
     private val releaseCapture: (ReleaseCapture) -> Unit = {},
     private val interactionStarted: () -> Unit = {},
+    private val interactionStopped: () -> Unit = {},
     executor: ExecutorService? = null,
 ) : ImageView(context), InteractiveRenderSurface {
     private val worker = executor ?: Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "wici-remote-render") }
@@ -69,6 +70,7 @@ class RemoteRenderView(
         beginInteraction()
         synchronized(stateLock) { cameraController?.reset() }
         requestFrame("interactive")
+        interactionStopped()
     }
 
     override fun shutdown() {
@@ -157,10 +159,12 @@ class RemoteRenderView(
             }
             MotionEvent.ACTION_UP -> {
                 pinching = false; pinchDistance = 0f
+                interactionStopped()
                 requestFrame("capture")
             }
             MotionEvent.ACTION_CANCEL -> {
                 pinching = false; pinchDistance = 0f
+                interactionStopped()
                 // Cancellation ends interaction without requesting capture.
             }
         }

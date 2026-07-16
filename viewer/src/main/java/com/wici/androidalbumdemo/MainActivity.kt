@@ -102,6 +102,7 @@ class MainActivity : Activity() {
     private var splatCacheMaxBytesOverride: Long? = null
     private var viewerVisible = false
     private var sceneViewMetadataOverride: SceneViewMetadata? = null
+    private var viewerInteractionActive = false
     private var previewRequestSerial = 0
     private var previewEnabled = false
     private var albumGrid: GridView? = null
@@ -128,7 +129,12 @@ class MainActivity : Activity() {
     private var nextImportedOrdinal = 1
     private var albumEditMode = false
     private val backendHandler = Handler(Looper.getMainLooper())
+    private var activatedBoxBackendBaseUrl: String? = null
     private var discoveredBackendBaseUrl: String? = null
+    private var suppliedBoxControlHost: String? = null
+    private var boxActivationAttemptedByHost = false
+    private var backendResolutionRun = 0
+    private var backendResolutionInProgress = false
     private var backendDiscoveryInProgress = false
     private var backendDiscoveryCompleted = false
     private var nsdDiscoveryListener: NsdManager.DiscoveryListener? = null
@@ -145,10 +151,8 @@ class MainActivity : Activity() {
         removedCuratedPhotoIds.addAll(loadRemovedCuratedPhotoIds())
 
         applyIntentOverrides(intent)
-        startBackendDiscoveryIfNeeded()
-        if (!showViewerFromIntent(intent)) {
-            showAlbum()
-        }
+        if (showViewerFromIntent(intent)) return
+        beginInitialBackendResolution()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -164,6 +168,11 @@ class MainActivity : Activity() {
 
     private fun applyIntentOverrides(intent: Intent) {
         sceneViewMetadataOverride = sceneViewMetadataFromIntent(intent)
+        suppliedBoxControlHost = normalizeControlHost(intent.getStringExtra(EXTRA_WICI_BOX_HOST))
+        activatedBoxBackendBaseUrl = normalizeBackendBaseUrl(
+            intent.getStringExtra(EXTRA_ACTIVATED_BACKEND_BASE_URL).orEmpty()
+        )
+        boxActivationAttemptedByHost = intent.getBooleanExtra(EXTRA_BOX_ACTIVATION_ATTEMPTED, false)
         releaseCaptureEnabled = !intent.getBooleanExtra("disableReleaseCapture", false)
         postPassEnabled = !intent.getBooleanExtra("disablePostPass", false)
         streamDensityOverride = intent.getStringExtra("streamDensity")
@@ -212,6 +221,7 @@ class MainActivity : Activity() {
 
     private fun showAlbum() {
         viewerVisible = false
+        viewerInteractionActive = false
         // Local media previews are opt-in because generating one uploads media.
         previewEnabled = false
         renderSurface?.shutdown()
@@ -439,13 +449,13 @@ class MainActivity : Activity() {
 
     private fun launchPhotoPicker() {
         val maxItems = try {
-            MediaStore.getPickImagesMaxLimit().coerceAtMost(PICK_IMAGES_MAX)
+            MediaStore.getPickImagesMaxLimit().takeIf { it > 1 }
         } catch (_: Exception) {
-            PICK_IMAGES_MAX
+            null
         }
         val intent = Intent(MediaStore.ACTION_PICK_IMAGES).apply {
             type = "image/*"
-            putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, maxItems)
+            maxItems?.let { putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, it) }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {
@@ -726,10 +736,6 @@ class MainActivity : Activity() {
                 -1
             }
             while (cursor.moveToNext()) {
-                if (photos.size >= DEVICE_PHOTO_LIMIT) {
-                    devicePhotoScanPartial = true
-                    continue
-                }
                 val id = cursor.getLong(idCol)
                 val displayName = cursor.getString(nameCol).orEmpty()
                 val mime = cursor.getString(mimeCol).orEmpty()
@@ -1689,6 +1695,7 @@ class MainActivity : Activity() {
 
     private fun showPhotoScreen(photo: AlbumPhoto) {
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         renderSurface?.shutdown()
         renderSurface?.pause()
@@ -1858,6 +1865,7 @@ class MainActivity : Activity() {
         reason: String,
         ingestEndpointOverride: String? = null,
         reconstructionProgress: (ReconstructionStage) -> Unit = {},
+        allowCloudFallback: Boolean = true,
     ) {
         val status = showReframingLoading(photo)
         val base = backendBaseUrl()
@@ -1882,32 +1890,50 @@ class MainActivity : Activity() {
                 null
             }
             runOnUiThread {
-                when (decision) {
-                    InitialRendererDecision.LOCAL -> {
-                        Log.i(TAG, "Renderer selected local photoId=${photo.photoId} mode=$mode capabilities=${health.capabilities}")
-                        showViewer(photo, ingestEndpointOverride, reconstructionProgress)
-                    }
-                    InitialRendererDecision.REMOTE -> {
-                        val source = remoteSource?.getOrElse { failure ->
-                            if (mode == RendererMode.AUTOMATIC) {
-                                showViewer(photo, ingestEndpointOverride, reconstructionProgress)
-                            } else {
-                                showRemoteRendererError(photo, base, "Cannot prepare image upload: ${failure.message}", ingestEndpointOverride, reconstructionProgress)
-                            }
-                            return@runOnUiThread
-                        } ?: return@runOnUiThread
-                        Log.i(TAG, "Renderer selected remote photoId=${photo.photoId} mode=$mode protocol=${RenderModePolicy.REMOTE_PROTOCOL}")
-                        showViewer(photo, ingestEndpointOverride, reconstructionProgress, RemoteViewerConfig(mode, source))
-                    }
-                    InitialRendererDecision.REMOTE_UNAVAILABLE -> {
-                        Log.w(TAG, "Explicit remote unavailable photoId=${photo.photoId} health=${health.message} capabilities=${health.capabilities}")
-                        showRemoteRendererError(
-                            photo,
-                            base,
-                            if (health.ok) "This server does not advertise ${RenderModePolicy.REMOTE_PROTOCOL}." else "Remote renderer unavailable: ${health.message}",
-                            ingestEndpointOverride,
-                            reconstructionProgress,
-                        )
+                if (!health.ok && allowCloudFallback && shouldFallbackDiscoveredLocal(base)) {
+                    Log.w(TAG, "Backend health precheck failed photoId=${photo.photoId} reason=$reason base=$base elapsedMs=${health.elapsedMs} error=${health.message}")
+                    switchDiscoveredLocalToCloud("health")
+                    status.text = "Using WiCi Cloud..."
+                    backendHandler.postDelayed(
+                        {
+                            beginBackendCheckedViewer(
+                                photo,
+                                "$reason-cloud-retry",
+                                ingestEndpointOverride,
+                                reconstructionProgress,
+                                allowCloudFallback = false,
+                            )
+                        },
+                        CLOUD_FALLBACK_MESSAGE_MS,
+                    )
+                } else {
+                    when (decision) {
+                        InitialRendererDecision.LOCAL -> {
+                            Log.i(TAG, "Renderer selected local photoId=${photo.photoId} mode=$mode capabilities=${health.capabilities}")
+                            showViewer(photo, ingestEndpointOverride, reconstructionProgress)
+                        }
+                        InitialRendererDecision.REMOTE -> {
+                            val source = remoteSource?.getOrElse { failure ->
+                                if (mode == RendererMode.AUTOMATIC) {
+                                    showViewer(photo, ingestEndpointOverride, reconstructionProgress)
+                                } else {
+                                    showRemoteRendererError(photo, base, "Cannot prepare image upload: ${failure.message}", ingestEndpointOverride, reconstructionProgress)
+                                }
+                                return@runOnUiThread
+                            } ?: return@runOnUiThread
+                            Log.i(TAG, "Renderer selected remote photoId=${photo.photoId} mode=$mode protocol=${RenderModePolicy.REMOTE_PROTOCOL}")
+                            showViewer(photo, ingestEndpointOverride, reconstructionProgress, RemoteViewerConfig(mode, source))
+                        }
+                        InitialRendererDecision.REMOTE_UNAVAILABLE -> {
+                            Log.w(TAG, "Explicit remote unavailable photoId=${photo.photoId} health=${health.message} capabilities=${health.capabilities}")
+                            showRemoteRendererError(
+                                photo,
+                                base,
+                                if (health.ok) "This server does not advertise ${RenderModePolicy.REMOTE_PROTOCOL}." else "Remote renderer unavailable: ${health.message}",
+                                ingestEndpointOverride,
+                                reconstructionProgress,
+                            )
+                        }
                     }
                 }
             }
@@ -2010,6 +2036,7 @@ class MainActivity : Activity() {
     private fun showReframingLoading(photo: AlbumPhoto): TextView {
         saveAlbumScrollPosition("showReframingLoading")
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         renderSurface?.shutdown()
         renderSurface?.pause()
@@ -2094,23 +2121,26 @@ class MainActivity : Activity() {
             }
             val code = conn.responseCode
             if (code in 200..299) {
-                val capabilities = if (service == "orbit") {
-                    val body = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
-                        val result = StringBuilder()
-                        val buffer = CharArray(4096)
-                        while (true) {
-                            val count = reader.read(buffer)
-                            if (count < 0) break
-                            if (result.length + count > BACKEND_HEALTH_MAX_CHARS) {
-                                throw IllegalArgumentException("health response is too large")
-                            }
-                            result.append(buffer, 0, count)
+                val body = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
+                    val result = StringBuilder()
+                    val buffer = CharArray(4096)
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        if (result.length + count > BACKEND_HEALTH_MAX_CHARS) {
+                            throw IllegalArgumentException("health response is too large")
                         }
-                        result.toString()
+                        result.append(buffer, 0, count)
                     }
-                    RenderModePolicy.capabilitiesFromHealth(body)
-                } else emptySet()
-                BackendHealthResult(true, "HTTP $code", elapsedMs(started), capabilities)
+                    result.toString()
+                }
+                val semanticOk = runCatching { JSONObject(body).optBoolean("ok", false) }.getOrDefault(false)
+                val capabilities = if (service == "orbit") RenderModePolicy.capabilitiesFromHealth(body) else emptySet()
+                if (semanticOk) {
+                    BackendHealthResult(true, "HTTP $code ok=true", elapsedMs(started), capabilities)
+                } else {
+                    BackendHealthResult(false, "HTTP $code ok!=true", elapsedMs(started))
+                }
             } else {
                 BackendHealthResult(false, "HTTP $code", elapsedMs(started))
             }
@@ -2138,15 +2168,17 @@ class MainActivity : Activity() {
     }
 
     private fun shouldFallbackDiscoveredLocal(baseUrl: String): Boolean {
-        val discovered = discoveredBackendBaseUrl ?: return false
-        if (manualBackendBaseUrl() != null) return false
-        return normalizeBackendBaseUrl(baseUrl) == discovered && discovered != DEFAULT_BACKEND_BASE_URL
+        val session = backendSessionChoice()
+        if (!BackendSessionPolicy.canFallbackToCloud(session.source)) return false
+        return normalizeBackendBaseUrl(baseUrl) == session.baseUrl && session.baseUrl != DEFAULT_BACKEND_BASE_URL
     }
 
     private fun switchDiscoveredLocalToCloud(reason: String) {
-        if (discoveredBackendBaseUrl == null) return
-        Log.w(TAG, "Backend local fallback to cloud reason=$reason old=$discoveredBackendBaseUrl cloud=$DEFAULT_BACKEND_BASE_URL")
+        val old = backendSessionChoice()
+        if (!BackendSessionPolicy.canFallbackToCloud(old.source)) return
+        Log.w(TAG, "Backend local fallback to cloud reason=$reason source=${old.source} old=${old.baseUrl} cloud=$DEFAULT_BACKEND_BASE_URL")
         stopBackendDiscovery()
+        activatedBoxBackendBaseUrl = null
         discoveredBackendBaseUrl = null
         backendDiscoveryInProgress = false
         backendDiscoveryCompleted = true
@@ -2381,6 +2413,7 @@ class MainActivity : Activity() {
         }
         saveAlbumScrollPosition("showViewer")
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         previewRequestSerial++
         cascadeRunSerial++
@@ -2428,15 +2461,36 @@ class MainActivity : Activity() {
                 { capture -> handleReleaseCapture(capture) },
                 { error -> runOnUiThread {
                     if (viewerVisible && currentViewerPhoto?.photoId == photo.photoId) {
-                        showBackendUnavailable(photo, viewerBackendBase, "stream", error)
+                        if (shouldFallbackDiscoveredLocal(viewerBackendBase)) {
+                            switchDiscoveredLocalToCloud("stream")
+                            val status = showReframingLoading(photo)
+                            status.text = "Using WiCi Cloud..."
+                            backendHandler.postDelayed(
+                                { beginBackendCheckedViewer(photo, "stream-cloud-retry", allowCloudFallback = false) },
+                                CLOUD_FALLBACK_MESSAGE_MS
+                            )
+                        } else {
+                            showBackendUnavailable(photo, viewerBackendBase, "stream", error)
+                        }
                     }
                 } },
-                { beginLiveOrbit() }, releaseCaptureEnabled, postPassEnabled,
-                streamDensityOverride, footprintScaleOverride,
-                photo.sourceWidth, photo.sourceHeight, photo.camFx, photo.camFy, photo.camCx, photo.camCy,
-                photo.splatStreamUrl, "$viewerGalleryUrl/splat_stream",
+                { handleViewerInteractionStarted() },
+                { handleViewerInteractionStopped() },
+                releaseCaptureEnabled,
+                postPassEnabled,
+                streamDensityOverride,
+                footprintScaleOverride,
+                photo.sourceWidth,
+                photo.sourceHeight,
+                photo.camFx,
+                photo.camFy,
+                photo.camCx,
+                photo.camCy,
+                photo.splatStreamUrl,
+                "$viewerGalleryUrl/splat_stream",
                 ingestEndpointOverride ?: "$viewerGalleryUrl/ingest",
-                photo.localUri?.takeIf { photo.imported }?.toString(), splatCacheMaxBytesOverride,
+                photo.localUri?.takeIf { photo.imported }?.toString(),
+                splatCacheMaxBytesOverride,
                 networkStreamEnabled = !photo.imported || photo.localUri != null,
                 reconstructionProgress = { stage ->
                     reconstructionProgress(stage)
@@ -2459,7 +2513,8 @@ class MainActivity : Activity() {
                     )
                 } },
                 releaseCapture = { capture -> handleReleaseCapture(capture) },
-                interactionStarted = { beginLiveOrbit() },
+                interactionStarted = { handleViewerInteractionStarted() },
+                interactionStopped = { handleViewerInteractionStopped() },
             )
         }
         val viewer = surface as View
@@ -2537,6 +2592,7 @@ class MainActivity : Activity() {
     private fun showStaticPhoto(photo: AlbumPhoto) {
         saveAlbumScrollPosition("showStaticPhoto")
         viewerVisible = true
+        viewerInteractionActive = false
         previewEnabled = false
         renderSurface?.shutdown()
         renderSurface?.pause()
@@ -2631,7 +2687,11 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (albumEditMode) {
+        if (backendResolutionInProgress) {
+            backendResolutionRun += 1
+            backendResolutionInProgress = false
+            finish()
+        } else if (albumEditMode) {
             exitAlbumEditMode()
         } else if (viewerVisible) {
             showAlbum()
@@ -2642,10 +2702,15 @@ class MainActivity : Activity() {
 
     private fun handleReleaseCapture(capture: ReleaseCapture) {
         if (difixBusy || fluxBusy) return
+        if (viewerInteractionActive) {
+            Log.i(TAG, "releaseCaptureIgnored interactionActive=true asset=${capture.assetName}")
+            return
+        }
         latestCapture = capture
         fluxDataUrl = null
         finalBitmap = null
         displayMode = DisplayMode.RAW
+        Log.i(TAG, "releaseCaptureAccepted asset=${capture.assetName} size=${capture.width}x${capture.height}")
         runOnUiThread {
             overlay.visibility = View.GONE
             updateViewerControls()
@@ -2653,13 +2718,29 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun beginLiveOrbit() {
-        if (displayMode == DisplayMode.RAW && overlay.visibility != View.VISIBLE) return
-        Log.i(TAG, "Live orbit requested; hiding result overlay from mode=$displayMode")
+    private fun handleViewerInteractionStarted() {
+        val hadCapture = latestCapture != null
+        val hadFlux = fluxDataUrl != null || finalBitmap != null
+        viewerInteractionActive = true
+        latestCapture = null
+        fluxDataUrl = null
+        finalBitmap = null
         displayMode = DisplayMode.RAW
-        overlay.visibility = View.GONE
+        if (::overlay.isInitialized) overlay.visibility = View.GONE
+        Log.i(
+            TAG,
+            "viewerInteractionStarted hideGenerate=true invalidatedCapture=$hadCapture " +
+                "invalidatedFlux=$hadFlux"
+        )
         updateViewerControls()
         setPipelineStatus("Showing raw splat")
+    }
+
+    private fun handleViewerInteractionStopped() {
+        if (!viewerInteractionActive) return
+        viewerInteractionActive = false
+        Log.i(TAG, "viewerInteractionStopped waitingForReleaseCapture=true")
+        updateViewerControls()
     }
 
     private fun buildDifixMultipartBody(capture: ReleaseCapture): DifixMultipartBody {
@@ -2734,7 +2815,7 @@ class MainActivity : Activity() {
             .put("interiorPx", capture.interiorPx)
             .put("coveredPx", capture.coveredPx)
 
-    private fun generateFlux() {
+    private fun generateFlux(allowCloudFallback: Boolean = true) {
         val capture = latestCapture ?: return
         if (difixBusy || fluxBusy) return
         val generateBackendBase = backendBaseUrl()
@@ -2773,7 +2854,11 @@ class MainActivity : Activity() {
                     val photo = currentViewerPhoto
                     runOnUiThread {
                         updateViewerControls()
-                        if (photo != null) {
+                        if (allowCloudFallback && shouldFallbackDiscoveredLocal(generateBackendBase)) {
+                            switchDiscoveredLocalToCloud("generate-health")
+                            setPipelineStatus("Using WiCi Cloud...")
+                            backendHandler.postDelayed({ generateFlux(allowCloudFallback = false) }, CLOUD_FALLBACK_MESSAGE_MS)
+                        } else if (photo != null) {
                             showGenerateUnavailable(
                                 photo,
                                 generateBackendBase,
@@ -2848,7 +2933,11 @@ class MainActivity : Activity() {
                     updateViewerControls()
                     val stageLabel = if (failureStage == "difix") "Difix" else "FLUX"
                     setPipelineStatus("$stageLabel failed: ${exc.message}")
-                    if (photo != null) {
+                    if (allowCloudFallback && shouldFallbackDiscoveredLocal(generateBackendBase)) {
+                        switchDiscoveredLocalToCloud(failureStage)
+                        setPipelineStatus("Using WiCi Cloud...")
+                        backendHandler.postDelayed({ generateFlux(allowCloudFallback = false) }, CLOUD_FALLBACK_MESSAGE_MS)
+                    } else if (photo != null) {
                         showGenerateUnavailable(photo, generateBackendBase, failureStage, exc.message ?: exc.javaClass.simpleName)
                     }
                 }
@@ -3464,6 +3553,10 @@ class MainActivity : Activity() {
                     normalizeBackendBaseUrl(manualText) ?: manualText.trim().takeIf { it.isNotBlank() }
                 ) ?: "Enter a server address"
             )
+            activatedBoxBackendBaseUrl != null -> ServerStatusModel(
+                statusLine = "Using WiCi Box",
+                addressLine = backendAddressLabel(activatedBoxBackendBaseUrl).orEmpty()
+            )
             discoveredBackendBaseUrl != null -> ServerStatusModel(
                 statusLine = "Connected to your WiCi box",
                 addressLine = backendAddressLabel(discoveredBackendBaseUrl)
@@ -3578,7 +3671,7 @@ class MainActivity : Activity() {
                 })
             } else {
                 val status = serverStatusModel(false, "")
-                val dotColor = if (discoveredBackendBaseUrl != null) quietGreen else COLOR_ACCENT
+                val dotColor = if (activatedBoxBackendBaseUrl != null || discoveredBackendBaseUrl != null) quietGreen else COLOR_ACCENT
                 contextZone.addView(
                     LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.HORIZONTAL
@@ -3916,6 +4009,217 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun beginInitialBackendResolution() {
+        backendResolutionRun += 1
+        val run = backendResolutionRun
+        if (manualBackendBaseUrl() != null) {
+            backendResolutionInProgress = false
+            showAlbum()
+            return
+        }
+
+        val activated = activatedBoxBackendBaseUrl
+        if (activated != null) {
+            showInitialBackendLoader("Checking 3D server...")
+            backendResolutionInProgress = true
+            networkExecutor.execute {
+                val health = checkOrbitHealth(activated)
+                runOnUiThread {
+                    if (run != backendResolutionRun || isFinishing) return@runOnUiThread
+                    if (health.ok) {
+                        suppliedBoxControlHost?.let { persistLastValidatedBoxHost(it) }
+                        backendResolutionInProgress = false
+                        Log.i(TAG, "Backend activated Box verified base=$activated elapsedMs=${health.elapsedMs}")
+                        showAlbum()
+                    } else {
+                        activatedBoxBackendBaseUrl = null
+                        fallbackInitialResolutionToCloud(run, "activated-health:${health.message}")
+                    }
+                }
+            }
+            return
+        }
+
+        if (boxActivationAttemptedByHost) {
+            showInitialBackendLoader("Using WiCi Cloud...")
+            backendResolutionInProgress = true
+            backendHandler.postDelayed({ fallbackInitialResolutionToCloud(run, "host-activation-failed") }, CLOUD_FALLBACK_MESSAGE_MS)
+            return
+        }
+
+        val standaloneHost = suppliedBoxControlHost ?: lastValidatedBoxHost()
+        if (standaloneHost != null) {
+            activateBoxForStandalone(standaloneHost, run)
+            return
+        }
+
+        backendResolutionInProgress = false
+        startBackendDiscoveryIfNeeded()
+        showAlbum()
+    }
+
+    private fun activateBoxForStandalone(host: String, run: Int) {
+        backendResolutionInProgress = true
+        showInitialBackendLoader("Contacting WiCi Box...")
+        networkExecutor.execute {
+            val started = SystemClock.elapsedRealtime()
+            try {
+                val discovery = controlJson("http://$host:$BOX_CONTROL_PORT/", "GET", BOX_STATUS_TIMEOUT_MS)
+                val actions = discovery.optJSONObject("actions")
+                require(actions?.optString("startSpatialStack")?.isNotBlank() == true) {
+                    "spatial activation unsupported"
+                }
+                var status = controlJson("http://$host:$BOX_CONTROL_PORT/start-spatial-stack", "POST", BOX_POST_TIMEOUT_MS)
+                var polls = 0
+                while (run == backendResolutionRun && SystemClock.elapsedRealtime() - started < BOX_ACTIVATION_DEADLINE_MS) {
+                    updateInitialBackendLoader(BoxStageText.spatial(status.optString("state"), readyMap(status)))
+                    status.optJSONObject("error")?.let { error ->
+                        throw RuntimeException(error.optString("message").ifBlank { error.optString("code", "start failed") })
+                    }
+                    if (status.optBoolean("spatialReady", false)) {
+                        val base = "http://$host:$BOX_BACKEND_PORT"
+                        updateInitialBackendLoader("Checking 3D server...")
+                        val health = checkOrbitHealth(base)
+                        require(health.ok) { "Orbit health ${health.message}" }
+                        runOnUiThread {
+                            if (run != backendResolutionRun || isFinishing) return@runOnUiThread
+                            activatedBoxBackendBaseUrl = base
+                            suppliedBoxControlHost = host
+                            persistLastValidatedBoxHost(host)
+                            backendResolutionInProgress = false
+                            Log.i(
+                                TAG,
+                                "Backend standalone Box ready operationId=${status.optString("operationId", "-")} " +
+                                    "base=$base elapsedMs=${SystemClock.elapsedRealtime() - started}"
+                            )
+                            showAlbum()
+                        }
+                        return@execute
+                    }
+                    Thread.sleep(BOX_POLL_MS)
+                    status = controlJson(
+                        "http://$host:$BOX_CONTROL_PORT/start-spatial-stack/status",
+                        "GET",
+                        BOX_STATUS_TIMEOUT_MS
+                    )
+                    polls += 1
+                    if (polls % BOX_REPOST_EVERY_POLLS == 0) {
+                        controlJson("http://$host:$BOX_CONTROL_PORT/start-spatial-stack", "POST", BOX_POST_TIMEOUT_MS)
+                    }
+                }
+                if (run == backendResolutionRun) throw RuntimeException("spatial startup timed out")
+            } catch (exc: Exception) {
+                Log.w(TAG, "Backend standalone Box activation failed host=$host error=${exc.message}")
+                runOnUiThread {
+                    if (run == backendResolutionRun && !isFinishing) fallbackInitialResolutionToCloud(run, exc.message ?: "activation failed")
+                }
+            }
+        }
+    }
+
+    private fun showInitialBackendLoader(message: String) {
+        val status = TextView(this).apply {
+            tag = INITIAL_BACKEND_STATUS_TAG
+            text = message
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 15f
+            typeface = inter(600)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleLarge).apply {
+                isIndeterminate = true
+                indeterminateTintList = ColorStateList.valueOf(COLOR_INK_SOFT)
+            }, LinearLayout.LayoutParams(dp(34), dp(34)).apply { bottomMargin = dp(14) })
+            addView(status)
+        }
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+            addView(ChevronButton(this@MainActivity).apply {
+                contentDescription = "back"
+                background = rounded(COLOR_SURFACE, dp(22).toFloat())
+                setOnClickListener {
+                    backendResolutionRun += 1
+                    backendResolutionInProgress = false
+                    finish()
+                }
+            }, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.TOP).apply {
+                topMargin = dp(26)
+                leftMargin = dp(18)
+            })
+            addView(stack, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        }
+        applyFullscreen(root)
+        setContentView(root)
+    }
+
+    private fun updateInitialBackendLoader(message: String) {
+        runOnUiThread {
+            findViewById<View>(android.R.id.content)?.rootView
+                ?.findViewWithTag<TextView>(INITIAL_BACKEND_STATUS_TAG)
+                ?.text = message
+            Log.i(TAG, "Backend activation stage=$message")
+        }
+    }
+
+    private fun fallbackInitialResolutionToCloud(run: Int, reason: String) {
+        if (run != backendResolutionRun || isFinishing) return
+        activatedBoxBackendBaseUrl = null
+        discoveredBackendBaseUrl = null
+        backendResolutionInProgress = true
+        updateInitialBackendLoader("Using WiCi Cloud...")
+        Log.w(TAG, "Backend initial fallback source=cloud reason=$reason")
+        backendHandler.postDelayed({
+            if (run == backendResolutionRun && !isFinishing) {
+                backendResolutionInProgress = false
+                showAlbum()
+            }
+        }, CLOUD_FALLBACK_MESSAGE_MS)
+    }
+
+    private fun controlJson(url: String, method: String, timeoutMs: Int): JSONObject {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = timeoutMs
+            readTimeout = timeoutMs
+            setRequestProperty("Accept", "application/json")
+            if (method == "POST") doOutput = false
+        }
+        return try {
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val body = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) throw RuntimeException("HTTP $code: ${body.take(160)}")
+            JSONObject(body)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun readyMap(status: JSONObject): Map<String, Boolean> {
+        val ready = status.optJSONObject("ready") ?: return emptyMap()
+        return ready.keys().asSequence().associateWith { ready.optBoolean(it, false) }
+    }
+
+    private fun normalizeControlHost(value: String?): String? {
+        val trimmed = value?.trim().orEmpty()
+        if (trimmed.isBlank()) return null
+        return runCatching {
+            Uri.parse(if (trimmed.contains("://")) trimmed else "http://$trimmed").host
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun persistLastValidatedBoxHost(host: String) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(PREF_LAST_BOX_CONTROL_HOST, host).apply()
+    }
+
+    private fun lastValidatedBoxHost(): String? = normalizeControlHost(
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(PREF_LAST_BOX_CONTROL_HOST, null)
+    )
+
     private fun manualBackendBaseUrl(): String? {
         val saved = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getString(PREF_BACKEND_BASE_URL, null)
@@ -3923,10 +4227,15 @@ class MainActivity : Activity() {
     }
 
     private fun backendBaseUrl(): String {
-        manualBackendBaseUrl()?.let { return it }
-        discoveredBackendBaseUrl?.let { return it }
-        return DEFAULT_BACKEND_BASE_URL
+        return backendSessionChoice().baseUrl
     }
+
+    private fun backendSessionChoice(): BackendSessionChoice = BackendSessionPolicy.choose(
+        manualUrl = manualBackendBaseUrl(),
+        activatedBoxUrl = activatedBoxBackendBaseUrl,
+        healthyNsdUrl = discoveredBackendBaseUrl,
+        cloudUrl = DEFAULT_BACKEND_BASE_URL
+    )
 
     private fun requiresCloudLogin(baseUrl: String = backendBaseUrl()): Boolean =
         runCatching {
@@ -3962,16 +4271,17 @@ class MainActivity : Activity() {
     }
 
     private fun backendSourceLabel(): String =
-        when {
-            manualBackendBaseUrl() != null -> "manual"
-            discoveredBackendBaseUrl != null -> "discovered local"
-            backendDiscoveryInProgress -> "cloud default while local discovery runs"
-            else -> "cloud default"
+        when (backendSessionChoice().source) {
+            BackendSource.MANUAL -> "manual"
+            BackendSource.ACTIVATED_BOX -> "activated Box"
+            BackendSource.NSD -> "healthy NSD local"
+            BackendSource.CLOUD -> if (backendDiscoveryInProgress) "cloud default while local discovery runs" else "cloud fallback"
         }
 
     private fun backendSettingsSummary(): String {
         val source = when {
             manualBackendBaseUrl() != null -> "Manual override"
+            activatedBoxBackendBaseUrl != null -> "Activated WiCi Box"
             discoveredBackendBaseUrl != null -> "Discovered local backend"
             backendDiscoveryInProgress -> "Cloud default while local discovery runs"
             else -> "Cloud default"
@@ -4007,6 +4317,10 @@ class MainActivity : Activity() {
 
     private fun startBackendDiscoveryIfNeeded(force: Boolean = false) {
         if (manualBackendBaseUrl() != null) {
+            stopBackendDiscovery()
+            return
+        }
+        if (activatedBoxBackendBaseUrl != null) {
             stopBackendDiscovery()
             return
         }
@@ -4057,24 +4371,35 @@ class MainActivity : Activity() {
                                 ?: fallbackHost
                             val port = service.port
                             val base = host?.let { normalizeBackendBaseUrl(httpBackendUrl(it, port)) }
-                            backendHandler.post {
-                                if (manualBackendBaseUrl() != null) return@post
-                                nsdResolveInFlight = false
-                                if (base != null) {
-                                    discoveredBackendBaseUrl = base
-                                    Log.i(
-                                        TAG,
-                                        "Backend NSD discovered local name=${service.serviceName} " +
-                                            "base=$base gallery=${galleryUrl()}"
-                                    )
-                                } else {
+                            if (base == null) {
+                                backendHandler.post {
+                                    nsdResolveInFlight = false
                                     Log.w(
                                         TAG,
                                         "Backend NSD resolved no routable address name=${service.serviceName} " +
                                             "port=$port addresses=${addresses.joinToString { it.hostAddress.orEmpty() }}"
                                     )
+                                    finishBackendDiscovery("resolved-invalid")
                                 }
-                                finishBackendDiscovery("resolved")
+                                return
+                            }
+                            networkExecutor.execute {
+                                val health = checkOrbitHealth(base)
+                                backendHandler.post {
+                                    if (manualBackendBaseUrl() != null || activatedBoxBackendBaseUrl != null) return@post
+                                    nsdResolveInFlight = false
+                                    if (health.ok) {
+                                        discoveredBackendBaseUrl = base
+                                        Log.i(
+                                            TAG,
+                                            "Backend NSD healthy local name=${service.serviceName} base=$base " +
+                                                "elapsedMs=${health.elapsedMs} gallery=${galleryUrl()}"
+                                        )
+                                    } else {
+                                        Log.w(TAG, "Backend NSD rejected unhealthy base=$base error=${health.message}")
+                                    }
+                                    finishBackendDiscovery(if (health.ok) "resolved-healthy" else "resolved-unhealthy")
+                                }
                             }
                         }
                     })
@@ -4211,7 +4536,6 @@ class MainActivity : Activity() {
             background = roundedState(COLOR_SURFACE, 0xFFF6F7FA.toInt(), dp(22).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
             applySoftShadow(this, 3)
             setOnClickListener {
-                beginLiveOrbit()
                 viewer.reset()
             }
         }
@@ -4266,6 +4590,11 @@ class MainActivity : Activity() {
         if (!::generateButton.isInitialized) return
         if (generateErrorOverlay != null) {
             generateButton.visibility = View.GONE
+            return
+        }
+        if (viewerInteractionActive) {
+            generateButton.visibility = View.GONE
+            styleStageButton("Generate", enabled = false, busy = false)
             return
         }
         if (displayMode == DisplayMode.FLUX && fluxDataUrl == null) {
@@ -4734,7 +5063,20 @@ class MainActivity : Activity() {
         private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
         private const val PREF_BACKEND_BASE_URL = "backend_base_url"
         private const val PREF_RENDERER_MODE = "renderer_mode"
+        private const val PREF_LAST_BOX_CONTROL_HOST = "last_box_control_host"
+        private const val EXTRA_WICI_BOX_HOST = "wiciBoxHost"
+        private const val EXTRA_ACTIVATED_BACKEND_BASE_URL = "activatedBackendBaseUrl"
+        private const val EXTRA_BOX_ACTIVATION_ATTEMPTED = "boxActivationAttempted"
         private const val DEFAULT_BACKEND_BASE_URL = "http://app.wici.ai:54228"
+        private const val BOX_CONTROL_PORT = 8992
+        private const val BOX_BACKEND_PORT = 54228
+        private const val BOX_POST_TIMEOUT_MS = 5_000
+        private const val BOX_STATUS_TIMEOUT_MS = 2_500
+        private const val BOX_POLL_MS = 1_000L
+        private const val BOX_REPOST_EVERY_POLLS = 10
+        private const val BOX_ACTIVATION_DEADLINE_MS = 180_000L
+        private const val CLOUD_FALLBACK_MESSAGE_MS = 650L
+        private const val INITIAL_BACKEND_STATUS_TAG = "initial-backend-status"
         private const val NSD_BACKEND_SERVICE_TYPE = "_wici-backend._tcp."
         private const val NSD_DISCOVERY_TIMEOUT_MS = 3_000L
         private const val BACKEND_HEALTH_TIMEOUT_MS = 2_500
@@ -4765,9 +5107,6 @@ class MainActivity : Activity() {
         private const val PREVIEW_REVEAL_START_SCALE = 0.96f
         private const val REQUEST_PICK_IMAGES = 4201
         private const val REQUEST_READ_MEDIA = 4202
-        private const val PICK_IMAGES_MAX = 100
-        // Interactive gallery budget; scene discovery separately budgets 500 images + 100 videos.
-        private const val DEVICE_PHOTO_LIMIT = 500
         private const val THUMBNAIL_MAX_SIDE = 400
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
         private const val PREVIEW_UPLOAD_MAX_SIDE = 1536
