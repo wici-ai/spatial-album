@@ -591,25 +591,131 @@ class MainActivity : Activity() {
             return
         }
         val base = backendBaseUrl()
+        Toast.makeText(this, "Checking backend reconstruction capabilities…", Toast.LENGTH_SHORT).show()
+        networkExecutor.execute {
+            val useGsplat = manifest.selectedCandidateIds.size >= 2 && GsplatTrainingClient.supports(base)
+            runOnUiThread { showSceneReconstructionConfirmation(manifest, anchorUri, base, useGsplat) }
+        }
+    }
+
+    private fun showSceneReconstructionConfirmation(
+        manifest: ReconstructionManifest,
+        anchorUri: Uri,
+        base: String,
+        useGsplat: Boolean,
+    ) {
         val kind = when {
             manualBackendBaseUrl() != null -> ReconstructionTargetKind.MANUAL
             discoveredBackendBaseUrl != null -> ReconstructionTargetKind.LAN
             else -> ReconstructionTargetKind.CLOUD
         }
-        val target = ConfirmedTarget("${kind.name}:$base", backendSourceLabel(), kind, "$base/orbit/ingest")
-        val confirmation = ReconstructionConfirmation(target, manifest, "image/jpeg", manifest.selectedCandidateIds.size - 1)
+        val endpoint = if (useGsplat) "$base/orbit/training/jobs" else "$base/orbit/ingest"
+        val target = ConfirmedTarget("${kind.name}:$base", backendSourceLabel(), kind, endpoint)
+        val confirmation = ReconstructionConfirmation(
+            target,
+            manifest,
+            "image/jpeg",
+            if (useGsplat) 0 else manifest.selectedCandidateIds.size - 1,
+            mode = if (useGsplat) ReconstructionMode.GSPLAT_MULTI_VIEW else ReconstructionMode.SHARP_SINGLE_IMAGE,
+            notice = if (useGsplat)
+                "All reviewed views listed below will be uploaded only after confirmation."
+            else
+                "Only the selected anchor is uploaded; all other scene members remain local.",
+        )
         val policy = TargetBoundConsentPolicy()
         val confirmationView = ReconstructionConfirmationView(this)
         confirmationView.bind(confirmation, decodeAnchorThumbnail(anchorUri)) {
-            val session = ReconstructionSession(policy) { anchorId, confirmedTarget, onStage ->
-                Log.i("Reconstruction", "confirmed anchor=${anchorId.hashCode().toUInt()} target=${confirmedTarget.kind}")
-                showReviewedAnchorViewer(anchorId, anchorUri, confirmedTarget, onStage)
-                object : ReconstructionRequest { override fun cancel() { renderSurface?.shutdown() } }
+            confirmationView.showStage(ReconstructionStage.Preparing)
+            val session = ReconstructionSession(policy) { submittedManifest, confirmedTarget, onStage ->
+                val reportStage: (ReconstructionStage) -> Unit = { stage ->
+                    onStage(stage)
+                    runOnUiThread { confirmationView.showStage(stage) }
+                }
+                Log.i(
+                    "Reconstruction",
+                    "confirmed anchor=${submittedManifest.anchorCandidateId.hashCode().toUInt()} " +
+                        "views=${submittedManifest.selectedCandidateIds.size} target=${confirmedTarget.kind} mode=${confirmation.mode}",
+                )
+                if (confirmation.mode == ReconstructionMode.GSPLAT_MULTI_VIEW) {
+                    startGsplatTraining(submittedManifest, confirmedTarget, reportStage)
+                } else {
+                    showReviewedAnchorViewer(submittedManifest.anchorCandidateId, anchorUri, confirmedTarget, reportStage)
+                    object : ReconstructionRequest { override fun cancel() { renderSurface?.shutdown() } }
+                }
             }
             check(session.submit(confirmation, policy.authorize(confirmation)))
         }
         applyFullscreen(ScrollView(this).apply { addView(confirmationView) })
         setContentView(confirmationView.parent as View)
+    }
+
+    private fun startGsplatTraining(
+        manifest: ReconstructionManifest,
+        target: ConfirmedTarget,
+        onStage: (ReconstructionStage) -> Unit,
+    ): ReconstructionRequest {
+        val candidates = manifest.selectedCandidateIds.toList().sorted().map { candidateId ->
+            val uri = requireNotNull(sceneCandidateUris[candidateId]) { "candidate is no longer available: $candidateId" }
+            GsplatTrainingCandidate(
+                candidateId = candidateId,
+                filename = "${candidateId.replace(Regex("[^A-Za-z0-9._-]"), "_")}.jpg",
+                contentType = contentResolver.getType(uri) ?: "image/jpeg",
+                open = { AndroidLocalMediaSource(this).open(uri) },
+            )
+        }
+        val client = GsplatTrainingClient(
+            target.endpoint,
+            File(cacheDir, "gsplat-training"),
+            networkExecutor,
+        )
+        return client.start(
+            manifest,
+            candidates,
+            onStage,
+            onReady = { result ->
+                val photoId = "scene-${manifest.sceneId.hashCode().toUInt()}"
+                val payload = SplatCache.inspect(result, SPLAT_ROW_BYTES)
+                    ?: error("training returned an invalid 32-byte splat")
+                val cacheKey = SplatCache.keyFor(photoId, streamDensityOverride ?: "backend-default")
+                val store = SplatCache.commit(
+                    this,
+                    cacheKey,
+                    result,
+                    splatCacheMaxBytesOverride ?: SplatCache.DEFAULT_MAX_BYTES,
+                )
+                check(store.stored) { "trained splat was not cached: ${store.reason ?: "unknown"}" }
+                Log.i(
+                    "Reconstruction",
+                    "gsplat cached photoId=$photoId records=${payload.records} bytes=${store.bytes} " +
+                        "totalBytes=${store.totalBytes} evicted=${store.evictedCount}",
+                )
+                runOnUiThread {
+                    val anchorUri = sceneCandidateUris[manifest.anchorCandidateId]
+                    val trained = AlbumPhoto(
+                        photoId = photoId,
+                        thumbnailUrl = anchorUri?.toString().orEmpty(),
+                        hasOrbit = false,
+                        hasSplat = true,
+                        sourceWidth = null,
+                        sourceHeight = null,
+                        camFx = null,
+                        camFy = null,
+                        camCx = null,
+                        camCy = null,
+                        splatStreamUrl = null,
+                        splatUrl = null,
+                        localUri = null,
+                        imported = true,
+                    )
+                    showViewer(trained)
+                }
+            },
+            onFailure = { message ->
+                runOnUiThread {
+                    Toast.makeText(this, "Multi-view training failed: $message", Toast.LENGTH_LONG).show()
+                }
+            },
+        )
     }
 
     private fun decodeAnchorThumbnail(uri: Uri): Bitmap? = runCatching {

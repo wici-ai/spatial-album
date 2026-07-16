@@ -43,20 +43,19 @@ identity and fingerprint still match.
 No device media is uploaded during permission, scanning, keyframe extraction,
 analysis, grouping, or review. Network-generated previews for local media are
 also disabled without separate explicit consent. Reconstruction has its own
-confirmation screen showing the selected backend, the exact JPEG anchor, and
-how many other members remain local. Consent is bound to the backend, scene,
-and anchor; changing any of them requires confirmation again. A disappearing
+confirmation screen showing the selected backend, reconstruction mode, anchor,
+and exact selected-view set. Consent is bound to the backend, scene, anchor,
+and selected views; changing any of them requires confirmation again. A disappearing
 LAN target does not silently authorize a cloud target. WiCi Cloud retains its
 Google sign-in boundary, while discovered or manually configured local backends
 can be selected explicitly.
 
-Important: the current `SharpSingleImageAdapter` submits exactly one confirmed
-photo or cached video keyframe to `/orbit/ingest`. SHARP performs a single-image
-reconstruction; this is **not multi-view fusion**, even when several local media
-items helped discover and review the scene. A future multi-view implementation
-should replace the reconstruction adapter/gateway contract, introduce a real
-multi-file or scene-job backend API, and preserve the same manifest, consent,
-progress, and local-media ownership boundaries.
+When a backend advertises `wici.gsplat-training.v1` and at least two views are
+selected, the app offers multi-view gsplat training and uploads every confirmed
+member to `/orbit/training/jobs`. It polls typed progress, downloads the final
+`.splat` into the bounded local cache, deletes the backend job, and opens the
+existing GLES viewer. Older backends retain the single-anchor SHARP path at
+`/orbit/ingest`; capability failure never silently uploads the multi-view set.
 
 ### Discovery limits and known limitations
 
@@ -73,8 +72,9 @@ evidence. Missing metadata is tolerated, but visually ambiguous material,
 vendor-specific video decoding, very long libraries beyond the scan budget, and
 scenes with little viewpoint diversity can still require manual correction or
 additional capture. Quality thresholds are heuristics and only affect the
-default selection. The current adapter reconstructs only the chosen anchor, so
-additional reviewed views do not improve SHARP reconstruction geometry yet.
+default selection. Multi-view quality still depends on usable overlap and a successful COLMAP
+registration. Single-view fallback reconstructs only the chosen anchor, so
+additional reviewed views do not improve SHARP geometry in that mode.
 
 ## Install
 
@@ -159,7 +159,9 @@ are not provided by the trusted-LAN backend configuration.
 
 The pipeline is:
 
-1. **SHARP** reconstructs a single photo into Gaussian splats.
+1. A capable local backend trains the confirmed multi-view set with
+   **COLMAP + gsplat**, preloading training tensors into CUDA; otherwise
+   **SHARP** reconstructs the confirmed single anchor.
 2. The Android app either streams/caches the splat for its native GLES3 viewer,
    or sends versioned camera requests to the remote Orbit renderer.
 3. The user moves the camera with bounded orbit, pan, zoom, and reset controls.

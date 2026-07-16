@@ -15,8 +15,8 @@ class ReconstructionProgressTest {
         val policy = TargetBoundConsentPolicy { "token" }
         val target = ConfirmedTarget("lan-a", "Living room box", ReconstructionTargetKind.LAN, "http://box/orbit/ingest")
         val confirmation = confirmation(target)
-        val session = ReconstructionSession(policy) { anchor, _, stage ->
-            requests++; uploaded = anchor
+        val session = ReconstructionSession(policy) { manifest, _, stage ->
+            requests++; uploaded = manifest.anchorCandidateId
             stage(ReconstructionStage.Uploading(321))
             stage(ReconstructionStage.WaitingForInference)
             stage(ReconstructionStage.Streaming(4, 80))
@@ -43,6 +43,13 @@ class ReconstructionProgressTest {
             object : ReconstructionRequest { override fun cancel() { cancelled = true } }
         }
         val lanConsent = policy.authorize(lanConfirmation)
+        val changedSelection = ReconstructionConfirmation(
+            lan,
+            ReconstructionManifest.from(ReviewedScene("scene", setOf("image", "video@1000", "third"), emptySet(), "video@1000")),
+            "image/jpeg",
+            0,
+        )
+        assertFalse(session.submit(changedSelection, lanConsent))
         assertFalse(session.submit(confirmation(cloud), lanConsent))
         assertEquals(0, requests)
         assertTrue(session.submit(lanConfirmation, lanConsent))
