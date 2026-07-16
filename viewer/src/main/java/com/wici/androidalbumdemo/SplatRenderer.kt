@@ -156,6 +156,7 @@ class SplatRenderer(
     private var firstStreamFrameLogged = false
     private var autoFitActive = false
     private var lastOrbitClampLogMs = 0L
+    private var lastPanClampLogMs = 0L
     private var lastPanMetricsLogMs = 0L
     private var depthMetricsLoggedCount = 0
     private var foregroundPanDepth = Float.NaN
@@ -202,6 +203,7 @@ class SplatRenderer(
         val nextPitch = pitch - dy * radiansPerPixel
         yaw = nextYaw.coerceIn(-WEB_AZIMUTH_LIMIT_RAD, WEB_AZIMUTH_LIMIT_RAD)
         pitch = nextPitch.coerceIn(-WEB_POLAR_LIMIT_RAD, WEB_POLAR_LIMIT_RAD)
+        enforcePanBounds("orbit")
         if (abs(yaw - nextYaw) > 1e-5f || abs(pitch - nextPitch) > 1e-5f) {
             val now = SystemClock.elapsedRealtime()
             if (now - lastOrbitClampLogMs > 250L) {
@@ -239,6 +241,7 @@ class SplatRenderer(
         } else {
             zoom = (zoom / scale.pow(WEB_ZOOM_SPEED)).coerceIn(MIN_ZOOM, MAX_ZOOM)
         }
+        enforcePanBounds("dolly")
         sortDirty = true
         requestFrame("dolly")
     }
@@ -247,8 +250,12 @@ class SplatRenderer(
         if (!dxPx.isFinite() || !dyPx.isFinite() || viewportW <= 1 || viewportH <= 1) return
         val metrics = panMetrics(model) ?: return
         val unitsPerPx = metrics.unitsPerPx
-        panX += dxPx * unitsPerPx
-        panY -= dyPx * unitsPerPx
+        applyPanBounds(
+            candidateX = panX + dxPx * unitsPerPx,
+            candidateY = panY - dyPx * unitsPerPx,
+            metrics = metrics,
+            reason = "pan"
+        )
         val now = SystemClock.elapsedRealtime()
         if (now - lastPanMetricsLogMs > PAN_METRICS_LOG_INTERVAL_MS) {
             lastPanMetricsLogMs = now
@@ -400,6 +407,7 @@ class SplatRenderer(
             setAutoFitProjection()
             Log.i(TAG, "autoFitProjection asset=$assetName viewport=${viewportW}x${viewportH} ${interactionProjectionLog()}")
         }
+        enforcePanBounds("surface-changed")
         createFbo(viewportW, viewportH)
         createPostFbos(viewportW, viewportH)
         sortDirty = true
@@ -689,6 +697,59 @@ class SplatRenderer(
             unitsPerPx = unitsPerPx,
             perceivedPan = perceivedPan
         )
+    }
+
+    private fun enforcePanBounds(reason: String) {
+        if (panX == 0f && panY == 0f) return
+        val metrics = panMetrics(model) ?: return
+        applyPanBounds(panX, panY, metrics, reason)
+    }
+
+    private fun applyPanBounds(
+        candidateX: Float,
+        candidateY: Float,
+        metrics: PanMetrics,
+        reason: String
+    ) {
+        // Use the nearer of the visible foreground and scene center so the same world-space
+        // translation cannot grow into an unsafe screen-space shift after zooming in. Bounds use
+        // the actual capture rect rather than the whole surface, which also handles letterboxing.
+        val referenceDepth = min(metrics.foregroundDistance, metrics.centerDistance)
+            .coerceAtLeast(MIN_FOREGROUND_PAN_DISTANCE)
+        val contentWidthPx = ((contentMaxX - contentMinX) * viewportW.toFloat()).coerceAtLeast(1f)
+        val contentHeightPx = ((contentMaxY - contentMinY) * viewportH.toFloat()).coerceAtLeast(1f)
+        val bounded = PanBounds.clamp(
+            x = candidateX,
+            y = candidateY,
+            referenceDepth = referenceDepth,
+            focalPx = metrics.focalPx,
+            contentWidthPx = contentWidthPx,
+            contentHeightPx = contentHeightPx,
+            maxShiftFraction = MAX_PAN_CAPTURE_FRACTION
+        )
+        panX = bounded.x
+        panY = bounded.y
+        if (bounded.clamped) {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastPanClampLogMs > PAN_CLAMP_LOG_INTERVAL_MS) {
+                lastPanClampLogMs = now
+                Log.i(
+                    TAG,
+                    ("panClamp reason=$reason photoId=$photoId pan=(%.4f,%.4f) limits=(%.4f,%.4f) " +
+                        "capturePx=%.0fx%.0f depth=%.4f fraction=%.2f")
+                        .format(
+                            panX,
+                            panY,
+                            bounded.maxX,
+                            bounded.maxY,
+                            contentWidthPx,
+                            contentHeightPx,
+                            referenceDepth,
+                            MAX_PAN_CAPTURE_FRACTION
+                        )
+                )
+            }
+        }
     }
 
     private fun foregroundPanDistance(m: SplatModel, fallback: Float): Float {
@@ -2704,6 +2765,10 @@ class SplatRenderer(
         private const val PAN_GAIN = 2.762f
         private const val MIN_FOREGROUND_PAN_DISTANCE = 0.35f
         private const val PAN_METRICS_LOG_INTERVAL_MS = 500L
+        private const val PAN_CLAMP_LOG_INTERVAL_MS = 250L
+        // Keep the camera translation within 35% of the generated capture area. The ellipse also
+        // limits diagonal travel, preserving enough source content for Difix/FLUX to regenerate.
+        private const val MAX_PAN_CAPTURE_FRACTION = 0.35f
         private const val WEB_AZIMUTH_LIMIT_DEG = 20f
         private const val WEB_POLAR_LIMIT_DEG = 12f
         private val WEB_AZIMUTH_LIMIT_RAD = Math.toRadians(WEB_AZIMUTH_LIMIT_DEG.toDouble()).toFloat()
