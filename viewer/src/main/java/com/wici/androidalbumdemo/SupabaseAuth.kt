@@ -30,10 +30,9 @@ import java.util.concurrent.Executors
  */
 object SupabaseAuth {
 
-    // Public, embeddable config (anon key is meant to ship in clients).
+    // Public, embeddable config (the publishable key is meant to ship in clients).
     const val SUPABASE_URL = "https://nqwatleukvclebomymdb.supabase.co"
-    const val SUPABASE_ANON_KEY =
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xd2F0bGV1a3ZjbGVib215bWRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4NzIyNDUsImV4cCI6MjA5ODQ0ODI0NX0.lVY55-oxfV-zO9XA6IszZjy0kd8Dw9LgDt7YKNoXuSM"
+    const val SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ddkzHf1KfIaAhw_WSQfPMw_xu1YY_om"
     // The Web OAuth client ID (serverClientId) — the audience Supabase validates against.
     const val GOOGLE_WEB_CLIENT_ID =
         "525978252888-bbf3d6iejgme0bio0th1r86suutnn71b.apps.googleusercontent.com"
@@ -111,8 +110,8 @@ object SupabaseAuth {
                     readTimeout = 20_000
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("apikey", SUPABASE_ANON_KEY)
-                    setRequestProperty("Authorization", "Bearer $SUPABASE_ANON_KEY")
+                    setRequestProperty("apikey", SUPABASE_PUBLISHABLE_KEY)
+                    setRequestProperty("Authorization", "Bearer $SUPABASE_PUBLISHABLE_KEY")
                 }
                 val payload = JSONObject()
                     .put("provider", "google")
