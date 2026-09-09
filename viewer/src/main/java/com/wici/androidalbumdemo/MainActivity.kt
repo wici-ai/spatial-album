@@ -2592,25 +2592,27 @@ class MainActivity : Activity() {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Spatial Album")
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val resolver = contentResolver
         var uri: Uri? = null
         try {
-            uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             requireNotNull(uri) { "MediaStore insert returned null" }
             resolver.openOutputStream(uri).use { out ->
                 requireNotNull(out) { "openOutputStream returned null" }
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) { "Image encoding failed" }
             }
             values.clear()
             values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-            setPipelineStatus("Saved to Downloads/$name")
+            check(resolver.update(uri, values, null, null) == 1) { "Could not publish saved image" }
+            setPipelineStatus("Saved to Pictures/Spatial Album/$name")
+            Toast.makeText(this, "Saved to album", Toast.LENGTH_SHORT).show()
         } catch (exc: Exception) {
-            uri?.let { resolver.delete(it, null, null) }
+            uri?.let { runCatching { resolver.delete(it, null, null) } }
             setPipelineStatus("Save failed: ${exc.message}")
+            Toast.makeText(this, "Couldn't save image. Please try again.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -4200,7 +4202,7 @@ class MainActivity : Activity() {
             }
             hasFlux && displayMode == DisplayMode.FLUX -> {
                 generateButton.visibility = View.VISIBLE
-                styleStageButton("Download", enabled = true, busy = false)
+                styleStageButton("Save", enabled = true, busy = false)
             }
             hasCapture -> {
                 generateButton.visibility = View.VISIBLE

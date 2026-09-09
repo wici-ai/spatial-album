@@ -16,7 +16,8 @@ Basic flow:
 2. The app reframes it into a 3D scene.
 3. Drag to orbit, use two fingers to pan, pinch to zoom, or tap **Reset**.
 4. Tap **Generate** to run refine + fill for the newly revealed areas.
-5. Tap **Download** to save the final image.
+5. Tap **Save** to save the final image to the **Spatial Album** album in Pictures.
+   A brief **Saved to album** confirmation disappears automatically.
 
 The Android app renders the splat scene on-device with OpenGL ES 3. The backend
 does the heavy model work.
@@ -30,7 +31,7 @@ https://github.com/wici-ai/spatial-album/releases/latest
 Then sideload it on Android and allow installation from unknown sources when
 prompted.
 
-Current release: `v0.2` (`versionName` `0.2`, `versionCode` `5`).
+Current release: `v0.4.4` (`versionName` `0.4.4`, `versionCode` `11`).
 
 Spatial Album is a non-commercial research/demo app because its backend uses
 non-commercial model licenses. See [License](#license).
@@ -95,7 +96,7 @@ instead of leaving the viewer blank when a backend is unreachable.
 
 ## Project Status
 
-- Current app release: `v0.2`
+- Current app release: `v0.4.4`
 - Android package: `com.wici.androidalbumdemo`
 - Cloud login: Google sign-in through Supabase, currently used as a client-side
   gate for WiCi Cloud.
