@@ -31,7 +31,7 @@ https://github.com/wici-ai/spatial-album/releases/latest
 Then sideload it on Android and allow installation from unknown sources when
 prompted.
 
-Current release: `v0.4.4` (`versionName` `0.4.4`, `versionCode` `11`).
+Current release: `v0.4.5` (`versionName` `0.4.5`, `versionCode` `12`).
 
 Spatial Album is a non-commercial research/demo app because its backend uses
 non-commercial model licenses. See [License](#license).

@@ -111,7 +111,7 @@ class MainActivity : Activity() {
     private val thumbnailCache = mutableMapOf<String, Bitmap>()
     private var albumPhotos: List<AlbumPhoto> = emptyList()
     private val importedPhotos = mutableListOf<AlbumPhoto>()
-    private val removedCuratedPhotoIds = mutableSetOf<String>()
+    private lateinit var albumRemovals: AlbumRemovals
     private val localSourceDataUrlCache = mutableMapOf<String, String>()
     private val localSourceJpegCache = mutableMapOf<String, ByteArray>()
     private var albumScrollState: AlbumScrollState? = null
@@ -138,7 +138,7 @@ class MainActivity : Activity() {
         window.statusBarColor = COLOR_CANVAS
         window.navigationBarColor = COLOR_CANVAS
         SupabaseAuth.init(this)
-        removedCuratedPhotoIds.addAll(loadRemovedCuratedPhotoIds())
+        albumRemovals = AlbumRemovals(loadRemovedPhotoKeys(), ::saveRemovedPhotoKeys)
 
         applyIntentOverrides(intent)
         if (showViewerFromIntent(intent)) return
@@ -478,6 +478,7 @@ class MainActivity : Activity() {
         if (uris.isEmpty()) return
         if (albumEditMode) exitAlbumEditMode()
         val added = uris.map { uri ->
+            albumRemovals.restore(uri.toString())
             val id = "local-${SystemClock.elapsedRealtime()}-${nextImportedOrdinal++}"
             AlbumPhoto(
                 photoId = id,
@@ -516,7 +517,8 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (requestSerial != galleryRequestSerial || viewerVisible) return@runOnUiThread
                     val importedUris = importedPhotos.mapNotNull { it.localUri?.toString() }.toSet()
-                    albumPhotos = importedPhotos + parsed.filterNot { it.localUri?.toString() in importedUris }
+                    albumPhotos = (importedPhotos + parsed.filterNot { it.localUri?.toString() in importedUris })
+                        .filterNot { albumRemovals.contains(it.photoId, it.localUri?.toString()) }
                     albumAdapter?.setPhotos(albumPhotos)
                     albumStatus?.text = momentCountText()
                     albumGrid?.let { restoreAlbumScrollPosition(it, "loadDeviceAlbum") }
@@ -577,6 +579,7 @@ class MainActivity : Activity() {
                 if (isFilteredDeviceImage(bucket, relativePath, displayName, mime, width, height)) continue
                 val photoId = "device-$id"
                 val uri = Uri.withAppendedPath(collection, id.toString())
+                if (albumRemovals.contains(photoId, uri.toString())) continue
                 val cachedPreview = orbitPreviewCacheFile(photoId).takeIf { it.length() > 0L }
                 photos += AlbumPhoto(
                     photoId = photoId,
@@ -640,7 +643,7 @@ class MainActivity : Activity() {
             val item = array.getJSONObject(i)
             val photoId = item.optString("photoId").trim()
             if (photoId.isEmpty()) continue
-            if (removedCuratedPhotoIds.contains(photoId)) continue
+            if (albumRemovals.contains(photoId)) continue
             val fallbackDims = legacySourceDims(photoId)
             val sourceWidth = firstOptionalInt(item, "sourceWidth", "source_width", "width", "imageWidth")
                 ?: fallbackDims?.first
@@ -1137,14 +1140,10 @@ class MainActivity : Activity() {
     }
 
     private fun removePhotoFromAlbum(photo: AlbumPhoto) {
-        if (photo.imported) {
-            importedPhotos.removeAll { it.photoId == photo.photoId }
-        } else {
-            removedCuratedPhotoIds.add(photo.photoId)
-            saveRemovedCuratedPhotoIds()
-        }
+        albumRemovals.remove(photo.photoId, photo.localUri?.toString())
+        importedPhotos.removeAll { albumRemovals.contains(it.photoId, it.localUri?.toString()) }
         thumbnailCache.remove(photo.photoId)
-        albumPhotos = albumPhotos.filterNot { it.photoId == photo.photoId }
+        albumPhotos = albumPhotos.filterNot { albumRemovals.contains(it.photoId, it.localUri?.toString()) }
         albumAdapter?.setPhotos(albumPhotos)
         albumStatus?.text = momentCountText()
         refreshVisibleEditMode()
@@ -3090,16 +3089,16 @@ class MainActivity : Activity() {
         return bytes
     }
 
-    private fun loadRemovedCuratedPhotoIds(): Set<String> =
+    private fun loadRemovedPhotoKeys(): Set<String> =
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getStringSet(PREF_REMOVED_CURATED_IDS, emptySet())
             ?.toSet()
             .orEmpty()
 
-    private fun saveRemovedCuratedPhotoIds() {
+    private fun saveRemovedPhotoKeys(keys: Set<String>) {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .edit()
-            .putStringSet(PREF_REMOVED_CURATED_IDS, removedCuratedPhotoIds.toSet())
+            .putStringSet(PREF_REMOVED_CURATED_IDS, keys)
             .apply()
     }
 
